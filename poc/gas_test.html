@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TdyTripPWA2026 — Phase 0 PoC GAS Verifier</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #64748b;
+      --primary: #0284c7;
+      --success: #16a34a;
+      --danger: #dc2626;
+      --warning: #d97706;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b0f19;
+        --card: #131b2e;
+        --border: #1e293b;
+        --text: #f1f5f9;
+        --muted: #94a3b8;
+        --primary: #38bdf8;
+      }
+    }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 640px;
+      margin: 0 auto;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    h1 {
+      font-size: 1.25rem;
+      margin: 0 0 6px;
+    }
+    .small { font-size: 0.85rem; color: var(--muted); }
+    label {
+      display: block;
+      margin-top: 10px;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.9rem;
+      margin-top: 4px;
+    }
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+    button {
+      padding: 10px 16px;
+      border: none;
+      border-radius: 6px;
+      background: var(--primary);
+      color: white;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      min-height: 44px;
+    }
+    button.secondary {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .log-item {
+      padding: 10px;
+      border-bottom: 1px solid var(--border);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.82rem;
+    }
+    .log-item:last-child { border-bottom: none; }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: bold;
+      font-size: 0.75rem;
+      margin-right: 6px;
+    }
+    .badge.pass { background: #dcfce7; color: var(--success); }
+    .badge.fail { background: #fee2e2; color: var(--danger); }
+    .badge.info { background: #e0f2fe; color: var(--primary); }
+    .badge.warn { background: #fef3c7; color: var(--warning); }
+    pre {
+      background: rgba(0,0,0,0.04);
+      padding: 8px;
+      border-radius: 4px;
+      overflow-x: auto;
+      margin: 6px 0 0;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="card">
+    <h1>TdyTripPWA2026 — Phase 0 PoC GAS Verifier</h1>
+    <div class="small">Kiểm định đường truyền thực tế: CORS, 302 Redirect, Lost-Response Idempotency, Concurrency Stale-Rev.</div>
+    
+    <label for="gasUrl">URL Google Apps Script Web App (Không hardcode, lưu cục bộ):</label>
+    <input type="text" id="gasUrl" placeholder="https://script.google.com/macros/s/.../exec">
+    
+    <label for="pocToken">Token bảo mật (Script Property POC_TOKEN, nếu có):</label>
+    <input type="password" id="pocToken" placeholder="Nhập token nếu đã cấu hình POC_TOKEN trong GAS">
+
+    <div class="btn-row">
+      <button id="runBtn" onclick="runPocTests()">Chạy Toàn Bộ Kiểm Thử (1 ⟶ 5)</button>
+      <button id="exportBtn" class="secondary" onclick="exportReport()" disabled>Xuất Báo Cáo JSON</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center">
+      <h2 style="font-size:0.95rem; margin:0">Nhật Ký Kiểm Thử (Live Audit Log)</h2>
+      <span id="summaryBadge" class="small" style="font-weight:bold">Chưa chạy</span>
+    </div>
+    <div id="logContainer" style="margin-top:12px">
+      <div class="log-item" style="color:var(--muted)">Nhập URL GAS và bấm "Chạy Toàn Bộ Kiểm Thử" để bắt đầu...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Quản lý cấu hình cục bộ
+const LS_URL_KEY = 'tdytrip_poc_gas_url';
+const LS_TOKEN_KEY = 'tdytrip_poc_token';
+
+const gasUrlInput = document.getElementById('gasUrl');
+const pocTokenInput = document.getElementById('pocToken');
+const runBtn = document.getElementById('runBtn');
+const exportBtn = document.getElementById('exportBtn');
+const logContainer = document.getElementById('logContainer');
+const summaryBadge = document.getElementById('summaryBadge');
+
+gasUrlInput.value = localStorage.getItem(LS_URL_KEY) || '';
+pocTokenInput.value = localStorage.getItem(LS_TOKEN_KEY) || '';
+
+gasUrlInput.addEventListener('input', () => localStorage.setItem(LS_URL_KEY, gasUrlInput.value.trim()));
+pocTokenInput.addEventListener('input', () => localStorage.setItem(LS_TOKEN_KEY, pocTokenInput.value.trim()));
+
+let sessionLogs = [];
+let testResults = {};
+
+// Ghi log an toàn qua textContent (chống XSS)
+function appendLog(badgeType, title, detailsObj) {
+  const item = document.createElement('div');
+  item.className = 'log-item';
+
+  const badge = document.createElement('span');
+  badge.className = 'badge ' + (badgeType.toLowerCase());
+  badge.textContent = badgeType;
+  item.appendChild(badge);
+
+  const titleEl = document.createElement('strong');
+  titleEl.textContent = ' ' + title;
+  item.appendChild(titleEl);
+
+  if (detailsObj !== undefined) {
+    const pre = document.createElement('pre');
+    pre.textContent = typeof detailsObj === 'object' ? JSON.stringify(detailsObj, null, 2) : String(detailsObj);
+    item.appendChild(pre);
+  }
+
+  logContainer.appendChild(item);
+  sessionLogs.push({ time: new Date().toISOString(), type: badgeType, title: title, details: detailsObj });
+}
+
+function genOpId(prefix) {
+  return (prefix || 'op') + '-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
+}
+
+// Hàm fetch bọc an toàn, đo thời gian và kiểm tra CORS
+async function safeFetch(url, options) {
+  const start = performance.now();
+  const token = pocTokenInput.value.trim();
+  
+  // Tuyệt đối không dùng no-cors
+  if (options.mode === 'no-cors') {
+    throw new Error('mode: no-cors bị nghiêm cấm trong PoC này.');
+  }
+
+  const res = await fetch(url, options);
+  const durationMs = Math.round(performance.now() - start);
+
+  const meta = {
+    status: res.status,
+    statusText: res.statusText,
+    type: res.type,
+    redirected: res.redirected,
+    url: res.url,
+    durationMs: durationMs
+  };
+
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} (${res.statusText}) sau ${durationMs}ms`);
+  }
+
+  const json = await res.json();
+  return { res: res, json: json, meta: meta };
+}
+
+async function runPocTests() {
+  const url = gasUrlInput.value.trim();
+  const token = pocTokenInput.value.trim();
+
+  if (!url) {
+    alert('Vui lòng nhập URL Google Apps Script Web App của bạn.');
+    gasUrlInput.focus();
+    return;
+  }
+
+  logContainer.textContent = '';
+  sessionLogs = [];
+  testResults = {};
+  runBtn.disabled = true;
+  exportBtn.disabled = true;
+  summaryBadge.textContent = 'Đang chạy kiểm tra...';
+
+  appendLog('INFO', 'Bắt đầu kiểm thử PoC', {
+    origin: window.location.origin,
+    userAgent: navigator.userAgent,
+    gasUrlDomain: url.split('/')[2]
+  });
+
+  let testRecordId = 'rec-' + Date.now();
+  let overallPass = true;
+
+  try {
+    // -------------------------------------------------------------
+    // TEST 1: GET Ping & Inspect Headers
+    // -------------------------------------------------------------
+    appendLog('INFO', 'Test 1: GET Ping & CORS Inspection', url);
+    try {
+      const pingUrl = url + (url.includes('?') ? '&' : '?') + 'action=ping' + (token ? '&token=' + encodeURIComponent(token) : '');
+      const t1 = await safeFetch(pingUrl, { method: 'GET', mode: 'cors' });
+      
+      if (t1.json && t1.json.ok === true) {
+        testResults.test1_get = { pass: true, meta: t1.meta };
+        appendLog('PASS', 'Test 1 ĐẠT: Đọc được JSON response qua GET, CORS hợp lệ', { meta: t1.meta, response: t1.json });
+      } else {
+        throw new Error('Response không chứa ok===true: ' + JSON.stringify(t1.json));
+      }
+    } catch (e1) {
+      testResults.test1_get = { pass: false, error: e1.message };
+      appendLog('FAIL', 'Test 1 THẤT BẠI', e1.message);
+      overallPass = false;
+    }
+
+    // -------------------------------------------------------------
+    // TEST 2: POST EXPENSE_CREATE (WAL + Full Record Return)
+    // -------------------------------------------------------------
+    const op1 = genOpId('op-create');
+    appendLog('INFO', 'Test 2: POST EXPENSE_CREATE (Tạo bản ghi mới)', { opId: op1, id: testRecordId });
+    try {
+      const payload1 = {
+        token: token,
+        opId: op1,
+        type: 'EXPENSE_CREATE',
+        payload: {
+          id: testRecordId,
+          title: 'Cà phê sáng PoC',
+          amount: 50000,
+          splitMethod: 'equal'
+        }
+      };
+      const t2 = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload1)
+      });
+
+      if (t2.json && t2.json.ok === true && t2.json.record && t2.json.record.rev === 1) {
+        testResults.test2_create = { pass: true, record: t2.json.record, meta: t2.meta };
+        appendLog('PASS', 'Test 2 ĐẠT: Tạo bản ghi thành công, nhận đủ record (rev=1)', { meta: t2.meta, record: t2.json.record });
+      } else {
+        throw new Error('Dữ liệu trả về không hợp lệ: ' + JSON.stringify(t2.json));
+      }
+    } catch (e2) {
+      testResults.test2_create = { pass: false, error: e2.message };
+      appendLog('FAIL', 'Test 2 THẤT BẠI', e2.message);
+      overallPass = false;
+    }
+
+    // -------------------------------------------------------------
+    // TEST 3: Lost-Response Simulation & Idempotent Count Verification
+    // -------------------------------------------------------------
+    const op2 = genOpId('op-lostres');
+    const recId2 = 'rec-lost-' + Date.now();
+    appendLog('INFO', 'Test 3: Mô phỏng mất response & Thử lại cùng opId', { opId: op2, recId: recId2 });
+    try {
+      const payload2 = {
+        token: token,
+        opId: op2,
+        type: 'EXPENSE_CREATE',
+        payload: { id: recId2, title: 'Bữa trưa Lost-Response', amount: 120000, splitMethod: 'equal' }
+      };
+
+      // Bước 3a: Gửi lần 1 với AbortController (mô phỏng timeout mất response sau khi gửi)
+      appendLog('INFO', 'Test 3a: Gửi lần 1 và ngắt client (mô phỏng mất mạng giữa chừng)...');
+      const abortCtrl = new AbortController();
+      let firstAttemptFinished = false;
+      try {
+        const timeoutPromise = new Promise((_, rej) => setTimeout(() => { abortCtrl.abort(); rej(new Error('AbortError: Client timeout mô phỏng')); }, 100));
+        await Promise.race([
+          safeFetch(url, { method: 'POST', mode: 'cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload2), signal: abortCtrl.signal }),
+          timeoutPromise
+        ]);
+        firstAttemptFinished = true;
+      } catch (abErr) {
+        appendLog('WARN', 'Test 3a: Client đã ngắt kết nối đúng kỳ vọng (Mô phỏng timeout thành công).', abErr.message);
+      }
+
+      // Đợi 1 giây để server hoàn tất ghi nếu có
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Bước 3b: Gửi lại chính xác op2 (Retry)
+      appendLog('INFO', 'Test 3b: Gửi lại lần 2 với CÙNG opId...');
+      const t3b = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload2)
+      });
+
+      if (!t3b.json || t3b.json.ok !== true || !t3b.json.record) {
+        throw new Error('Lần retry không trả về kết quả hợp lệ: ' + JSON.stringify(t3b.json));
+      }
+
+      // Bước 3c: Kiểm tra GET ?action=count&opId=op2 ⟶ Bắt buộc count == 1
+      appendLog('INFO', 'Test 3c: Xác minh số dòng thực tế trong Google Sheet bằng action=count...');
+      const countUrl = url + (url.includes('?') ? '&' : '?') + 'action=count&opId=' + encodeURIComponent(op2) + (token ? '&token=' + encodeURIComponent(token) : '');
+      const t3c = await safeFetch(countUrl, { method: 'GET', mode: 'cors' });
+
+      if (t3c.json && t3c.json.ok === true && t3c.json.count === 1) {
+        testResults.test3_idempotency = { pass: true, count: 1, duplicateReported: t3b.json.duplicate };
+        appendLog('PASS', 'Test 3 ĐẠT: Idempotency hoàn hảo! Đúng 1 dòng duy nhất trong Sheet sau retry.', {
+          retryResponse: t3b.json,
+          sheetCountResult: t3c.json
+        });
+      } else {
+        throw new Error('Số dòng trong Sheet không bằng 1 (count=' + (t3c.json ? t3c.json.count : 'unknown') + ')! Nguy cơ trùng lặp dữ liệu.');
+      }
+    } catch (e3) {
+      testResults.test3_idempotency = { pass: false, error: e3.message };
+      appendLog('FAIL', 'Test 3 THẤT BẠI', e3.message);
+      overallPass = false;
+    }
+
+    // -------------------------------------------------------------
+    // TEST 4: UPDATE Concurrency & Stale Revision (Client A vs Client B)
+    // -------------------------------------------------------------
+    appendLog('INFO', 'Test 4: Đối kháng Revision (Client A sửa cũ vs Client B sửa mới)', { targetId: testRecordId });
+    try {
+      const op3B = genOpId('op-upd-B');
+      const op4A = genOpId('op-upd-A');
+
+      // Client B cập nhật hợp lệ với expectedRev = 1 ⟶ Thành công rev=2
+      appendLog('INFO', 'Test 4a: Client B cập nhật với expectedRev=1...');
+      const payload3B = {
+        token: token,
+        opId: op3B,
+        type: 'EXPENSE_UPDATE',
+        payload: { id: testRecordId, expectedRev: 1, title: 'Cà phê sửa bởi B', amount: 60000 }
+      };
+      const t4b = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload3B)
+      });
+
+      if (!t4b.json || t4b.json.ok !== true || t4b.json.record.rev !== 2) {
+        throw new Error('Client B cập nhật không thành công lên rev=2: ' + JSON.stringify(t4b.json));
+      }
+      appendLog('PASS', 'Test 4a ĐẠT: Client B cập nhật thành công lên rev=2', t4b.json.record);
+
+      // Client A cố tình cập nhật với expectedRev=1 cũ ⟶ Server BẮT BUỘC từ chối ERR_STALE_REV
+      appendLog('INFO', 'Test 4b: Client A cố tình cập nhật với expectedRev=1 cũ (Mô phỏng xung đột offline)...');
+      const payload4A = {
+        token: token,
+        opId: op4A,
+        type: 'EXPENSE_UPDATE',
+        payload: { id: testRecordId, expectedRev: 1, title: 'Cà phê sửa bởi A (bị cũ)', amount: 70000 }
+      };
+      const t4a = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload4A)
+      });
+
+      if (t4a.json && t4a.json.ok === false && t4a.json.error === 'ERR_STALE_REV' && t4a.json.currentRecord && t4a.json.currentRecord.rev === 2) {
+        appendLog('PASS', 'Test 4b ĐẠT: Server phát hiện Stale Rev chuẩn xác! Từ chối ghi đè và trả về bản ghi server hiện tại.', t4a.json);
+      } else {
+        throw new Error('Server không từ chối stale revision hoặc không trả currentRecord: ' + JSON.stringify(t4a.json));
+      }
+
+      // Client B gửi lại op3B cũ ⟶ Nhận replay duplicate
+      appendLog('INFO', 'Test 4c: Client B gửi lại op3B cũ...');
+      const t4c = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload3B)
+      });
+      if (t4c.json && t4c.json.ok === true && t4c.json.duplicate === true) {
+        appendLog('PASS', 'Test 4c ĐẠT: Replay UPDATE nhận cờ duplicate: true và đủ record', t4c.json);
+      } else {
+        throw new Error('Replay UPDATE thất bại: ' + JSON.stringify(t4c.json));
+      }
+
+      testResults.test4_concurrency = { pass: true };
+    } catch (e4) {
+      testResults.test4_concurrency = { pass: false, error: e4.message };
+      appendLog('FAIL', 'Test 4 THẤT BẠI', e4.message);
+      overallPass = false;
+    }
+
+    // -------------------------------------------------------------
+    // TEST 5: DELETE Tombstone Verification
+    // -------------------------------------------------------------
+    appendLog('INFO', 'Test 5: Xóa bản ghi bằng Tombstone (deleted=true, rev=3)', { targetId: testRecordId });
+    try {
+      const op5 = genOpId('op-del');
+      const payload5 = {
+        token: token,
+        opId: op5,
+        type: 'EXPENSE_DELETE',
+        payload: { id: testRecordId, expectedRev: 2 }
+      };
+      const t5 = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload5)
+      });
+
+      if (t5.json && t5.json.ok === true && t5.json.record && t5.json.record.deleted === true && t5.json.record.rev === 3) {
+        testResults.test5_delete = { pass: true, record: t5.json.record };
+        appendLog('PASS', 'Test 5 ĐẠT: Xóa bằng Tombstone thành công, rev=3, deleted=true', t5.json.record);
+      } else {
+        throw new Error('DELETE không trả về tombstone hợp lệ: ' + JSON.stringify(t5.json));
+      }
+    } catch (e5) {
+      testResults.test5_delete = { pass: false, error: e5.message };
+      appendLog('FAIL', 'Test 5 THẤT BẠI', e5.message);
+      overallPass = false;
+    }
+
+  } catch (fatalErr) {
+    overallPass = false;
+    appendLog('FAIL', 'LỖI NGHIÊM TRỌNG TRONG QUÁ TRÌNH TEST', fatalErr.message);
+  } finally {
+    runBtn.disabled = false;
+    exportBtn.disabled = false;
+    if (overallPass) {
+      summaryBadge.textContent = '100% PASS (5/5)';
+      summaryBadge.style.color = 'var(--success)';
+    } else {
+      summaryBadge.textContent = 'CÓ BÀI FAIL (Xem log)';
+      summaryBadge.style.color = 'var(--danger)';
+    }
+  }
+}
+
+function exportReport() {
+  const report = {
+    appName: 'TdyTripPWA2026 Phase 0 PoC Verification',
+    exportedAt: new Date().toISOString(),
+    environment: {
+      origin: window.location.origin,
+      protocol: window.location.protocol,
+      userAgent: navigator.userAgent,
+      screen: `${window.innerWidth}x${window.innerHeight}`
+    },
+    gasTarget: {
+      domain: (gasUrlInput.value.trim().split('/')[2]) || 'unknown',
+      hasTokenConfigured: Boolean(pocTokenInput.value.trim())
+    },
+    testResults: testResults,
+    auditLogs: sessionLogs
+  };
+
+  const jsonStr = JSON.stringify(report, null, 2);
+
+  // Copy vào clipboard
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(jsonStr).then(() => {
+      alert('Đã sao chép báo cáo kiểm thử JSON vào Clipboard!');
+    }).catch(() => {});
+  }
+
+  // Tải file xuống
+  const blob = new Blob([jsonStr], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `tdytrip_poc_report_${Date.now()}.json`;
+  a.click();
+}
+</script>
+</body>
+</html>
