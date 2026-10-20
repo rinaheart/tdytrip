@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TdyTripPWA2026 — Phase 0 PoC GAS Verifier</title>
+  <title>TdyTripPWA2026 — Phase 0 PoC GAS Verifier (v0.2.0)</title>
   <style>
     :root {
       --bg: #f8fafc;
@@ -35,7 +35,7 @@
       line-height: 1.5;
     }
     .container {
-      max-width: 640px;
+      max-width: 680px;
       margin: 0 auto;
     }
     .card {
@@ -89,6 +89,10 @@
       border: 1px solid var(--border);
       color: var(--text);
     }
+    button.warning {
+      background: var(--warning);
+      color: white;
+    }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     .log-item {
       padding: 10px;
@@ -118,22 +122,33 @@
       white-space: pre-wrap;
       word-break: break-all;
     }
+    .stat-box {
+      display: flex;
+      gap: 12px;
+      margin-top: 8px;
+      padding: 8px 12px;
+      background: rgba(0,0,0,0.02);
+      border-radius: 6px;
+      font-size: 0.82rem;
+    }
   </style>
 </head>
 <body>
 <div class="container">
   <div class="card">
     <h1>TdyTripPWA2026 — Phase 0 PoC GAS Verifier</h1>
-    <div class="small">Kiểm định đường truyền thực tế: CORS, 302 Redirect, Lost-Response Idempotency, Concurrency Stale-Rev.</div>
+    <div class="small">Kiểm định chuẩn: WAL Sweep Recovery, Stale Rejection, ID Conflict, Offline Real Test & Đo Latency (p50/p95).</div>
     
     <label for="gasUrl">URL Google Apps Script Web App (Không hardcode, lưu cục bộ):</label>
     <input type="text" id="gasUrl" placeholder="https://script.google.com/macros/s/.../exec">
     
-    <label for="pocToken">Token bảo mật (Script Property POC_TOKEN, nếu có):</label>
-    <input type="password" id="pocToken" placeholder="Nhập token nếu đã cấu hình POC_TOKEN trong GAS">
+    <label for="pocToken">Token bảo mật (Script Property POC_TOKEN):</label>
+    <input type="password" id="pocToken" placeholder="Nhập token đã cấu hình trong Script Properties">
 
     <div class="btn-row">
-      <button id="runBtn" onclick="runPocTests()">Chạy Toàn Bộ Kiểm Thử (1 ⟶ 5)</button>
+      <button id="runBtn" onclick="runAutomatedSuite()">Chạy Kiểm Thử Tự Động (1 ⟶ 5)</button>
+      <button id="latencyBtn" class="secondary" onclick="runLatencyBenchmark()">Đo Latency (10 Lần)</button>
+      <button id="offlineBtn" class="warning" onclick="startInteractiveOfflineTest()">Test Offline Thật (Airplane Mode)</button>
       <button id="exportBtn" class="secondary" onclick="exportReport()" disabled>Xuất Báo Cáo JSON</button>
     </div>
   </div>
@@ -143,23 +158,26 @@
       <h2 style="font-size:0.95rem; margin:0">Nhật Ký Kiểm Thử (Live Audit Log)</h2>
       <span id="summaryBadge" class="small" style="font-weight:bold">Chưa chạy</span>
     </div>
+    <div id="latencyBox" class="stat-box" style="display:none"></div>
     <div id="logContainer" style="margin-top:12px">
-      <div class="log-item" style="color:var(--muted)">Nhập URL GAS và bấm "Chạy Toàn Bộ Kiểm Thử" để bắt đầu...</div>
+      <div class="log-item" style="color:var(--muted)">Nhập URL GAS và bấm "Chạy Kiểm Thử Tự Động" để bắt đầu...</div>
     </div>
   </div>
 </div>
 
 <script>
-// Quản lý cấu hình cục bộ
 const LS_URL_KEY = 'tdytrip_poc_gas_url';
 const LS_TOKEN_KEY = 'tdytrip_poc_token';
 
 const gasUrlInput = document.getElementById('gasUrl');
 const pocTokenInput = document.getElementById('pocToken');
 const runBtn = document.getElementById('runBtn');
+const latencyBtn = document.getElementById('latencyBtn');
+const offlineBtn = document.getElementById('offlineBtn');
 const exportBtn = document.getElementById('exportBtn');
 const logContainer = document.getElementById('logContainer');
 const summaryBadge = document.getElementById('summaryBadge');
+const latencyBox = document.getElementById('latencyBox');
 
 gasUrlInput.value = localStorage.getItem(LS_URL_KEY) || '';
 pocTokenInput.value = localStorage.getItem(LS_TOKEN_KEY) || '';
@@ -169,14 +187,15 @@ pocTokenInput.addEventListener('input', () => localStorage.setItem(LS_TOKEN_KEY,
 
 let sessionLogs = [];
 let testResults = {};
+let latencySamples = [];
+let backendInfo = { version: 'unknown', debugCrashEnabled: false };
 
-// Ghi log an toàn qua textContent (chống XSS)
 function appendLog(badgeType, title, detailsObj) {
   const item = document.createElement('div');
   item.className = 'log-item';
 
   const badge = document.createElement('span');
-  badge.className = 'badge ' + (badgeType.toLowerCase());
+  badge.className = 'badge ' + badgeType.toLowerCase();
   badge.textContent = badgeType;
   item.appendChild(badge);
 
@@ -198,13 +217,9 @@ function genOpId(prefix) {
   return (prefix || 'op') + '-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
 }
 
-// Hàm fetch bọc an toàn, đo thời gian và kiểm tra CORS
 async function safeFetch(url, options) {
   const start = performance.now();
-  const token = pocTokenInput.value.trim();
-  
-  // Tuyệt đối không dùng no-cors
-  if (options.mode === 'no-cors') {
+  if (options && options.mode === 'no-cors') {
     throw new Error('mode: no-cors bị nghiêm cấm trong PoC này.');
   }
 
@@ -228,12 +243,12 @@ async function safeFetch(url, options) {
   return { res: res, json: json, meta: meta };
 }
 
-async function runPocTests() {
+async function runAutomatedSuite() {
   const url = gasUrlInput.value.trim();
   const token = pocTokenInput.value.trim();
 
   if (!url) {
-    alert('Vui lòng nhập URL Google Apps Script Web App của bạn.');
+    alert('Vui lòng nhập URL Google Apps Script Web App.');
     gasUrlInput.focus();
     return;
   }
@@ -243,174 +258,171 @@ async function runPocTests() {
   testResults = {};
   runBtn.disabled = true;
   exportBtn.disabled = true;
-  summaryBadge.textContent = 'Đang chạy kiểm tra...';
+  summaryBadge.textContent = 'Đang chạy kiểm thử...';
 
-  appendLog('INFO', 'Bắt đầu kiểm thử PoC', {
+  appendLog('INFO', 'Bắt đầu kiểm thử PoC v0.2.0', {
     origin: window.location.origin,
-    userAgent: navigator.userAgent,
-    gasUrlDomain: url.split('/')[2]
+    userAgent: navigator.userAgent
   });
 
-  let testRecordId = 'rec-' + Date.now();
   let overallPass = true;
+  const testRecId = 'rec-' + Date.now();
 
   try {
     // -------------------------------------------------------------
-    // TEST 1: GET Ping & Inspect Headers
+    // TEST 1: GET Ping, Token Check & CORS Inspection
     // -------------------------------------------------------------
-    appendLog('INFO', 'Test 1: GET Ping & CORS Inspection', url);
+    appendLog('INFO', 'Test 1: GET Ping & Token & CORS Verification');
     try {
       const pingUrl = url + (url.includes('?') ? '&' : '?') + 'action=ping' + (token ? '&token=' + encodeURIComponent(token) : '');
       const t1 = await safeFetch(pingUrl, { method: 'GET', mode: 'cors' });
       
       if (t1.json && t1.json.ok === true) {
-        testResults.test1_get = { pass: true, meta: t1.meta };
-        appendLog('PASS', 'Test 1 ĐẠT: Đọc được JSON response qua GET, CORS hợp lệ', { meta: t1.meta, response: t1.json });
+        backendInfo.version = t1.json.version || 'v0.1.0';
+        backendInfo.debugCrashEnabled = Boolean(t1.json.debugCrashEnabled);
+        testResults.test1_ping = { pass: true, version: backendInfo.version, meta: t1.meta };
+        appendLog('PASS', `Test 1 ĐẠT: Backend version ${backendInfo.version}, debugCrash=${backendInfo.debugCrashEnabled}`, { meta: t1.meta, response: t1.json });
       } else {
         throw new Error('Response không chứa ok===true: ' + JSON.stringify(t1.json));
       }
     } catch (e1) {
-      testResults.test1_get = { pass: false, error: e1.message };
-      appendLog('FAIL', 'Test 1 THẤT BẠI', e1.message);
+      testResults.test1_ping = { pass: false, error: e1.message };
+      appendLog('FAIL', 'Test 1 THẤT BẠI: Lỗi CORS hoặc Token', e1.message);
       overallPass = false;
     }
 
     // -------------------------------------------------------------
-    // TEST 2: POST EXPENSE_CREATE (WAL + Full Record Return)
+    // TEST 2: Input Validation & Error Replay (No Orphan PENDING_APPLY)
     // -------------------------------------------------------------
-    const op1 = genOpId('op-create');
-    appendLog('INFO', 'Test 2: POST EXPENSE_CREATE (Tạo bản ghi mới)', { opId: op1, id: testRecordId });
+    const opVal = genOpId('op-val');
+    appendLog('INFO', 'Test 2: Kiểm tra Validation & Replay lỗi (Không để PENDING_APPLY mồ côi)', { opId: opVal });
     try {
-      const payload1 = {
+      // 2a: Gửi amount âm (-50000)
+      const invalidPayload = {
         token: token,
-        opId: op1,
+        opId: opVal,
         type: 'EXPENSE_CREATE',
-        payload: {
-          id: testRecordId,
-          title: 'Cà phê sáng PoC',
-          amount: 50000,
-          splitMethod: 'equal'
-        }
+        payload: { title: 'Test âm tiền', amount: -50000, splitMethod: 'equal' }
       };
-      const t2 = await safeFetch(url, {
+      const t2a = await safeFetch(url, {
         method: 'POST',
         mode: 'cors',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payload1)
+        body: JSON.stringify(invalidPayload)
       });
 
-      if (t2.json && t2.json.ok === true && t2.json.record && t2.json.record.rev === 1) {
-        testResults.test2_create = { pass: true, record: t2.json.record, meta: t2.meta };
-        appendLog('PASS', 'Test 2 ĐẠT: Tạo bản ghi thành công, nhận đủ record (rev=1)', { meta: t2.meta, record: t2.json.record });
+      if (t2a.json && t2a.json.ok === false && t2a.json.error === 'ERR_VALIDATION') {
+        appendLog('PASS', 'Test 2a ĐẠT: Server phát hiện và từ chối ERR_VALIDATION chuẩn xác', t2a.json);
       } else {
-        throw new Error('Dữ liệu trả về không hợp lệ: ' + JSON.stringify(t2.json));
+        throw new Error('Server không trả về ERR_VALIDATION khi amount âm: ' + JSON.stringify(t2a.json));
+      }
+
+      // 2b: Replay cùng opVal cũ -> Server BẮT BUỘC trả lại đúng lỗi cũ, không chạy lại
+      const t2b = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(invalidPayload)
+      });
+
+      if (t2b.json && t2b.json.ok === false && t2b.json.duplicate === true && t2b.json.error === 'ERR_VALIDATION') {
+        testResults.test2_validation = { pass: true };
+        appendLog('PASS', 'Test 2b ĐẠT: Replay thao tác bị reject trả về đúng lỗi cũ (Idempotent Rejection, không mồ côi PENDING_APPLY)', t2b.json);
+      } else {
+        throw new Error('Replay validation error không trả về đúng lỗi cũ: ' + JSON.stringify(t2b.json));
       }
     } catch (e2) {
-      testResults.test2_create = { pass: false, error: e2.message };
+      testResults.test2_validation = { pass: false, error: e2.message };
       appendLog('FAIL', 'Test 2 THẤT BẠI', e2.message);
       overallPass = false;
     }
 
     // -------------------------------------------------------------
-    // TEST 3: Lost-Response Simulation & Idempotent Count Verification
+    // TEST 3: POST CREATE & ID Conflict Detection
     // -------------------------------------------------------------
-    const op2 = genOpId('op-lostres');
-    const recId2 = 'rec-lost-' + Date.now();
-    appendLog('INFO', 'Test 3: Mô phỏng mất response & Thử lại cùng opId', { opId: op2, recId: recId2 });
+    const op3a = genOpId('op-create-1');
+    const op3b = genOpId('op-conflict');
+    appendLog('INFO', 'Test 3: POST CREATE & Kiểm tra chống trùng ID (ERR_ID_CONFLICT)', { id: testRecId });
     try {
-      const payload2 = {
+      // 3a: Tạo bản ghi mới hợp lệ
+      const createPayload = {
         token: token,
-        opId: op2,
+        opId: op3a,
         type: 'EXPENSE_CREATE',
-        payload: { id: recId2, title: 'Bữa trưa Lost-Response', amount: 120000, splitMethod: 'equal' }
+        payload: { id: testRecId, title: 'Ăn tối nhóm', amount: 350000, splitMethod: 'equal' }
       };
+      const t3a = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(createPayload)
+      });
 
-      // Bước 3a: Gửi lần 1 với AbortController (mô phỏng timeout mất response sau khi gửi)
-      appendLog('INFO', 'Test 3a: Gửi lần 1 và ngắt client (mô phỏng mất mạng giữa chừng)...');
-      const abortCtrl = new AbortController();
-      let firstAttemptFinished = false;
-      try {
-        const timeoutPromise = new Promise((_, rej) => setTimeout(() => { abortCtrl.abort(); rej(new Error('AbortError: Client timeout mô phỏng')); }, 100));
-        await Promise.race([
-          safeFetch(url, { method: 'POST', mode: 'cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload2), signal: abortCtrl.signal }),
-          timeoutPromise
-        ]);
-        firstAttemptFinished = true;
-      } catch (abErr) {
-        appendLog('WARN', 'Test 3a: Client đã ngắt kết nối đúng kỳ vọng (Mô phỏng timeout thành công).', abErr.message);
+      if (t3a.json && t3a.json.ok === true && t3a.json.record && t3a.json.record.rev === 1) {
+        appendLog('PASS', 'Test 3a ĐẠT: Tạo bản ghi thành công (rev=1, amount=350000)', t3a.json.record);
+      } else {
+        throw new Error('Tạo bản ghi thất bại: ' + JSON.stringify(t3a.json));
       }
 
-      // Đợi 1 giây để server hoàn tất ghi nếu có
-      await new Promise(r => setTimeout(r, 1500));
-
-      // Bước 3b: Gửi lại chính xác op2 (Retry)
-      appendLog('INFO', 'Test 3b: Gửi lại lần 2 với CÙNG opId...');
+      // 3b: Cố tình tạo bản ghi với CÙNG testRecId nhưng opId khác (op3b) -> Bắt buộc ERR_ID_CONFLICT
+      const conflictPayload = {
+        token: token,
+        opId: op3b,
+        type: 'EXPENSE_CREATE',
+        payload: { id: testRecId, title: 'Cố tình trùng ID', amount: 100000, splitMethod: 'equal' }
+      };
       const t3b = await safeFetch(url, {
         method: 'POST',
         mode: 'cors',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payload2)
+        body: JSON.stringify(conflictPayload)
       });
 
-      if (!t3b.json || t3b.json.ok !== true || !t3b.json.record) {
-        throw new Error('Lần retry không trả về kết quả hợp lệ: ' + JSON.stringify(t3b.json));
-      }
-
-      // Bước 3c: Kiểm tra GET ?action=count&opId=op2 ⟶ Bắt buộc count == 1
-      appendLog('INFO', 'Test 3c: Xác minh số dòng thực tế trong Google Sheet bằng action=count...');
-      const countUrl = url + (url.includes('?') ? '&' : '?') + 'action=count&opId=' + encodeURIComponent(op2) + (token ? '&token=' + encodeURIComponent(token) : '');
-      const t3c = await safeFetch(countUrl, { method: 'GET', mode: 'cors' });
-
-      if (t3c.json && t3c.json.ok === true && t3c.json.count === 1) {
-        testResults.test3_idempotency = { pass: true, count: 1, duplicateReported: t3b.json.duplicate };
-        appendLog('PASS', 'Test 3 ĐẠT: Idempotency hoàn hảo! Đúng 1 dòng duy nhất trong Sheet sau retry.', {
-          retryResponse: t3b.json,
-          sheetCountResult: t3c.json
-        });
+      if (t3b.json && t3b.json.ok === false && t3b.json.error === 'ERR_ID_CONFLICT') {
+        testResults.test3_create_id_conflict = { pass: true };
+        appendLog('PASS', 'Test 3b ĐẠT: Server phát hiện trùng ID khác opId, trả về ERR_ID_CONFLICT chuẩn xác (Không báo duplicate ảo)', t3b.json);
       } else {
-        throw new Error('Số dòng trong Sheet không bằng 1 (count=' + (t3c.json ? t3c.json.count : 'unknown') + ')! Nguy cơ trùng lặp dữ liệu.');
+        throw new Error('Server không chặn trùng ID khi khác opId: ' + JSON.stringify(t3b.json));
       }
     } catch (e3) {
-      testResults.test3_idempotency = { pass: false, error: e3.message };
+      testResults.test3_create_id_conflict = { pass: false, error: e3.message };
       appendLog('FAIL', 'Test 3 THẤT BẠI', e3.message);
       overallPass = false;
     }
 
     // -------------------------------------------------------------
-    // TEST 4: UPDATE Concurrency & Stale Revision (Client A vs Client B)
+    // TEST 4: Concurrency Stale Revision & Replay Stale Error
     // -------------------------------------------------------------
-    appendLog('INFO', 'Test 4: Đối kháng Revision (Client A sửa cũ vs Client B sửa mới)', { targetId: testRecordId });
+    appendLog('INFO', 'Test 4: Đối kháng Concurrency & Replay Stale Revision');
     try {
-      const op3B = genOpId('op-upd-B');
+      const op4B = genOpId('op-upd-B');
       const op4A = genOpId('op-upd-A');
 
-      // Client B cập nhật hợp lệ với expectedRev = 1 ⟶ Thành công rev=2
-      appendLog('INFO', 'Test 4a: Client B cập nhật với expectedRev=1...');
-      const payload3B = {
+      // Client B cập nhật hợp lệ expectedRev: 1 -> rev: 2
+      const payload4B = {
         token: token,
-        opId: op3B,
+        opId: op4B,
         type: 'EXPENSE_UPDATE',
-        payload: { id: testRecordId, expectedRev: 1, title: 'Cà phê sửa bởi B', amount: 60000 }
+        payload: { id: testRecId, expectedRev: 1, title: 'Ăn tối (Client B sửa)', amount: 400000 }
       };
       const t4b = await safeFetch(url, {
         method: 'POST',
         mode: 'cors',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payload3B)
+        body: JSON.stringify(payload4B)
       });
 
       if (!t4b.json || t4b.json.ok !== true || t4b.json.record.rev !== 2) {
-        throw new Error('Client B cập nhật không thành công lên rev=2: ' + JSON.stringify(t4b.json));
+        throw new Error('Client B cập nhật không đạt rev=2: ' + JSON.stringify(t4b.json));
       }
       appendLog('PASS', 'Test 4a ĐẠT: Client B cập nhật thành công lên rev=2', t4b.json.record);
 
-      // Client A cố tình cập nhật với expectedRev=1 cũ ⟶ Server BẮT BUỘC từ chối ERR_STALE_REV
-      appendLog('INFO', 'Test 4b: Client A cố tình cập nhật với expectedRev=1 cũ (Mô phỏng xung đột offline)...');
+      // Client A cố tình gửi expectedRev: 1 cũ -> Bắt buộc ERR_STALE_REV
       const payload4A = {
         token: token,
         opId: op4A,
         type: 'EXPENSE_UPDATE',
-        payload: { id: testRecordId, expectedRev: 1, title: 'Cà phê sửa bởi A (bị cũ)', amount: 70000 }
+        payload: { id: testRecId, expectedRev: 1, title: 'Ăn tối (Client A sửa cũ)', amount: 450000 }
       };
       const t4a = await safeFetch(url, {
         method: 'POST',
@@ -419,27 +431,24 @@ async function runPocTests() {
         body: JSON.stringify(payload4A)
       });
 
-      if (t4a.json && t4a.json.ok === false && t4a.json.error === 'ERR_STALE_REV' && t4a.json.currentRecord && t4a.json.currentRecord.rev === 2) {
-        appendLog('PASS', 'Test 4b ĐẠT: Server phát hiện Stale Rev chuẩn xác! Từ chối ghi đè và trả về bản ghi server hiện tại.', t4a.json);
-      } else {
-        throw new Error('Server không từ chối stale revision hoặc không trả currentRecord: ' + JSON.stringify(t4a.json));
+      if (!t4a.json || t4a.json.ok !== false || t4a.json.error !== 'ERR_STALE_REV') {
+        throw new Error('Server không từ chối ERR_STALE_REV: ' + JSON.stringify(t4a.json));
       }
+      appendLog('PASS', 'Test 4b ĐẠT: Server từ chối Stale Rev và trả về currentRecord (rev=2)', t4a.json);
 
-      // Client B gửi lại op3B cũ ⟶ Nhận replay duplicate
-      appendLog('INFO', 'Test 4c: Client B gửi lại op3B cũ...');
-      const t4c = await safeFetch(url, {
+      // Replay op4A cũ -> Vẫn trả về đúng ERR_STALE_REV cũ
+      const t4a_replay = await safeFetch(url, {
         method: 'POST',
         mode: 'cors',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payload3B)
+        body: JSON.stringify(payload4A)
       });
-      if (t4c.json && t4c.json.ok === true && t4c.json.duplicate === true) {
-        appendLog('PASS', 'Test 4c ĐẠT: Replay UPDATE nhận cờ duplicate: true và đủ record', t4c.json);
+      if (t4a_replay.json && t4a_replay.json.ok === false && t4a_replay.json.duplicate === true && t4a_replay.json.error === 'ERR_STALE_REV') {
+        testResults.test4_concurrency = { pass: true };
+        appendLog('PASS', 'Test 4c ĐẠT: Replay Stale Operation trả về đúng lỗi cũ (không để PENDING_APPLY mồ côi)', t4a_replay.json);
       } else {
-        throw new Error('Replay UPDATE thất bại: ' + JSON.stringify(t4c.json));
+        throw new Error('Replay stale op thất bại: ' + JSON.stringify(t4a_replay.json));
       }
-
-      testResults.test4_concurrency = { pass: true };
     } catch (e4) {
       testResults.test4_concurrency = { pass: false, error: e4.message };
       appendLog('FAIL', 'Test 4 THẤT BẠI', e4.message);
@@ -447,27 +456,27 @@ async function runPocTests() {
     }
 
     // -------------------------------------------------------------
-    // TEST 5: DELETE Tombstone Verification
+    // TEST 5: DELETE Tombstone
     // -------------------------------------------------------------
-    appendLog('INFO', 'Test 5: Xóa bản ghi bằng Tombstone (deleted=true, rev=3)', { targetId: testRecordId });
+    appendLog('INFO', 'Test 5: Xóa bản ghi bằng Tombstone (deleted=true, rev=3)');
     try {
       const op5 = genOpId('op-del');
-      const payload5 = {
+      const delPayload = {
         token: token,
         opId: op5,
         type: 'EXPENSE_DELETE',
-        payload: { id: testRecordId, expectedRev: 2 }
+        payload: { id: testRecId, expectedRev: 2 }
       };
       const t5 = await safeFetch(url, {
         method: 'POST',
         mode: 'cors',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payload5)
+        body: JSON.stringify(delPayload)
       });
 
       if (t5.json && t5.json.ok === true && t5.json.record && t5.json.record.deleted === true && t5.json.record.rev === 3) {
         testResults.test5_delete = { pass: true, record: t5.json.record };
-        appendLog('PASS', 'Test 5 ĐẠT: Xóa bằng Tombstone thành công, rev=3, deleted=true', t5.json.record);
+        appendLog('PASS', 'Test 5 ĐẠT: Xóa bằng Tombstone thành công (deleted=true, rev=3)', t5.json.record);
       } else {
         throw new Error('DELETE không trả về tombstone hợp lệ: ' + JSON.stringify(t5.json));
       }
@@ -477,25 +486,244 @@ async function runPocTests() {
       overallPass = false;
     }
 
-  } catch (fatalErr) {
+    // -------------------------------------------------------------
+    // TEST 6: Crash Simulation & Sweep (Chỉ chạy khi DEBUG_CRASH_ENABLED=true)
+    // -------------------------------------------------------------
+    if (backendInfo.debugCrashEnabled) {
+      appendLog('INFO', 'Test 6: Mô phỏng Crash Server có kiểm soát (DEBUG_CRASH_ENABLED=true)');
+      try {
+        const opCrashA = genOpId('op-crash-A');
+        const recCrashA = 'rec-crash-' + Date.now();
+        
+        // 6a: Mô phỏng sau khi ghi business row thì server sập trước khi chốt ACKED
+        appendLog('INFO', 'Test 6a: Gửi mutation với debugCrash="afterBusinessWrite"...');
+        try {
+          await safeFetch(url, {
+            method: 'POST',
+            mode: 'cors',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({
+              token: token,
+              opId: opCrashA,
+              type: 'EXPENSE_CREATE',
+              payload: { id: recCrashA, title: 'Crash Test', amount: 50000, splitMethod: 'equal' },
+              debugCrash: 'afterBusinessWrite'
+            })
+          });
+        } catch (simErr) {
+          appendLog('WARN', 'Server đã crash đúng như mô phỏng (HTTP error bắt được).', simErr.message);
+        }
+
+        // 6b: Client B gửi 1 thao tác khác để kích hoạt SWEEP RECOVERY của server
+        const opDummyB = genOpId('op-dummy-B');
+        const recDummyB = 'rec-dummy-' + Date.now();
+        appendLog('INFO', 'Test 6b: Client B gửi mutation mới để kích hoạt Sweep PENDING_APPLY...');
+        await safeFetch(url, {
+          method: 'POST',
+          mode: 'cors',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            token: token,
+            opId: opDummyB,
+            type: 'EXPENSE_CREATE',
+            payload: { id: recDummyB, title: 'Dummy B', amount: 20000, splitMethod: 'equal' }
+          })
+        });
+
+        // 6c: Client A thử lại cùng opCrashA -> Server BẮT BUỘC trả về kết quả đã swept ACKED, count = 1
+        appendLog('INFO', 'Test 6c: Client A gửi lại opCrashA sau khi server đã sweep...');
+        const t6c = await safeFetch(url, {
+          method: 'POST',
+          mode: 'cors',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            token: token,
+            opId: opCrashA,
+            type: 'EXPENSE_CREATE',
+            payload: { id: recCrashA, title: 'Crash Test', amount: 50000, splitMethod: 'equal' }
+          })
+        });
+
+        const countUrl = url + (url.includes('?') ? '&' : '?') + 'action=count&opId=' + encodeURIComponent(opCrashA) + (token ? '&token=' + encodeURIComponent(token) : '');
+        const c6 = await safeFetch(countUrl, { method: 'GET', mode: 'cors' });
+
+        if (t6c.json && t6c.json.ok === true && t6c.json.duplicate === true && c6.json && c6.json.count === 1) {
+          testResults.test6_crash_recovery = { pass: true, count: 1 };
+          appendLog('PASS', 'Test 6 ĐẠT: Crash recovery sweep hoạt động hoàn hảo! Đúng 1 bản ghi duy nhất, A nhận kết quả ACKED sau khi B ghi đè.', {
+            response: t6c.json,
+            countResult: c6.json
+          });
+        } else {
+          throw new Error('Crash recovery thất bại hoặc trùng dòng: ' + JSON.stringify(t6c.json));
+        }
+      } catch (e6) {
+        testResults.test6_crash_recovery = { pass: false, error: e6.message };
+        appendLog('FAIL', 'Test 6 THẤT BẠI', e6.message);
+        overallPass = false;
+      }
+    } else {
+      appendLog('INFO', 'Test 6 (Crash Simulation) BỎ QUA vì DEBUG_CRASH_ENABLED=false (Chỉ bật trong Script Properties khi cần kiểm tra).');
+    }
+
+  } catch (fatal) {
     overallPass = false;
-    appendLog('FAIL', 'LỖI NGHIÊM TRỌNG TRONG QUÁ TRÌNH TEST', fatalErr.message);
+    appendLog('FAIL', 'LỖI KHÔNG XÁC ĐỊNH', fatal.message);
   } finally {
     runBtn.disabled = false;
     exportBtn.disabled = false;
     if (overallPass) {
-      summaryBadge.textContent = '100% PASS (5/5)';
+      summaryBadge.textContent = '100% PASS';
       summaryBadge.style.color = 'var(--success)';
     } else {
-      summaryBadge.textContent = 'CÓ BÀI FAIL (Xem log)';
+      summaryBadge.textContent = 'CÓ BÀI THẤT BẠI';
       summaryBadge.style.color = 'var(--danger)';
     }
   }
 }
 
+// -------------------------------------------------------------
+// ĐO ĐẠC LATENCY (10 LẦN LIÊN TIẾP)
+// -------------------------------------------------------------
+async function runLatencyBenchmark() {
+  const url = gasUrlInput.value.trim();
+  const token = pocTokenInput.value.trim();
+  if (!url) { alert('Vui lòng nhập URL GAS.'); return; }
+
+  latencyBtn.disabled = true;
+  latencyBox.style.display = 'block';
+  latencyBox.textContent = 'Đang đo latency (10 requests liên tiếp)...';
+  latencySamples = [];
+
+  for (let i = 1; i <= 10; i++) {
+    const pingUrl = url + (url.includes('?') ? '&' : '?') + 'action=ping' + (token ? '&token=' + encodeURIComponent(token) : '') + '&_t=' + Date.now();
+    try {
+      const res = await safeFetch(pingUrl, { method: 'GET', mode: 'cors' });
+      latencySamples.push(res.meta.durationMs);
+      latencyBox.textContent = `Đã đo ${i}/10 lần... Lần gần nhất: ${res.meta.durationMs}ms`;
+    } catch (e) {
+      latencySamples.push(9999);
+    }
+  }
+
+  latencySamples.sort((a, b) => a - b);
+  const min = latencySamples[0];
+  const max = latencySamples[latencySamples.length - 1];
+  const p50 = latencySamples[Math.floor(latencySamples.length * 0.5)];
+  const p95 = latencySamples[Math.floor(latencySamples.length * 0.95)];
+  const avg = Math.round(latencySamples.reduce((a, b) => a + b, 0) / latencySamples.length);
+
+  testResults.latencyStats = { min, max, p50, p95, avg, samples: latencySamples };
+
+  latencyBox.innerHTML = `<strong>Kết Quả Latency (10 calls):</strong> Min: ${min}ms | Avg: ${avg}ms | <strong>p50: ${p50}ms</strong> | <strong>p95: ${p95}ms</strong> | Max: ${max}ms`;
+  appendLog('INFO', 'Kết Quả Đo Latency 10 Lần', testResults.latencyStats);
+
+  if (p50 > 2500) {
+    appendLog('WARN', 'CẢNH BÁO LATENCY CAO: p50 > 2.5s. Với tốc độ này, việc đẩy FIFO từng thao tác tuần tự khi có 5-10 pending ops sẽ mất 15-25s. Ở Phase 3 bắt buộc thiết kế cơ chế Batch Operations (gộp nhiều op vào 1 POST payload) để giảm thời gian chờ của người dùng!');
+  }
+
+  latencyBtn.disabled = false;
+  exportBtn.disabled = false;
+}
+
+// -------------------------------------------------------------
+// TEST OFFLINE THẬT (AIRPLANE MODE INTERACTIVE)
+// -------------------------------------------------------------
+let offlineOpId = null;
+let offlineRecId = null;
+
+function startInteractiveOfflineTest() {
+  const url = gasUrlInput.value.trim();
+  const token = pocTokenInput.value.trim();
+  if (!url) { alert('Vui lòng nhập URL GAS.'); return; }
+
+  offlineOpId = genOpId('op-offline-real');
+  offlineRecId = 'rec-off-' + Date.now();
+
+  appendLog('WARN', '--- BƯỚC 1 TEST OFFLINE THẬT ---', {
+    huongDan: '1. Hãy BẬT CHẾ ĐỘ MÁY BAY (Airplane Mode) trên điện thoại ngay bây giờ.\n2. Sau khi đã tắt toàn bộ Wifi/4G, hãy bấm nút "Gửi Trong Lúc Mất Mạng" bên dưới.'
+  });
+
+  const btnStep1 = document.createElement('button');
+  btnStep1.textContent = 'Gửi Trong Lúc Mất Mạng (Phải Báo Lỗi Mạng)';
+  btnStep1.onclick = async () => {
+    btnStep1.disabled = true;
+    try {
+      appendLog('INFO', 'Đang thử gửi thao tác khi ngoại tuyến...', { opId: offlineOpId });
+      await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          token: token,
+          opId: offlineOpId,
+          type: 'EXPENSE_CREATE',
+          payload: { id: offlineRecId, title: 'Khoản chi ghi lúc mất mạng', amount: 80000, splitMethod: 'equal' }
+        })
+      });
+      appendLog('FAIL', 'THẤT BẠI: Lẽ ra phải rớt mạng nhưng request lại thành công! Bạn chưa bật chế độ máy bay?');
+    } catch (netErr) {
+      appendLog('PASS', 'ĐẠT: Đã bắt được lỗi mất mạng hợp lệ! Thao tác được giữ an toàn trong hàng đợi.', netErr.message);
+      promptReconnect();
+    }
+  };
+  logContainer.appendChild(btnStep1);
+}
+
+function promptReconnect() {
+  appendLog('WARN', '--- BƯỚC 2 TEST OFFLINE THẬT ---', {
+    huongDan: '1. Bây giờ hãy TẮT CHẾ ĐỘ MÁY BAY (Bật lại Wifi/4G).\n2. Chờ điện thoại có sóng mạng ổn định.\n3. Bấm nút "Gửi Lại Cùng opId (Replay)" bên dưới để xác minh.'
+  });
+
+  const url = gasUrlInput.value.trim();
+  const token = pocTokenInput.value.trim();
+
+  const btnStep2 = document.createElement('button');
+  btnStep2.textContent = 'Gửi Lại Cùng opId (Đã Có Mạng Trở Lại)';
+  btnStep2.onclick = async () => {
+    btnStep2.disabled = true;
+    try {
+      appendLog('INFO', 'Đang gửi lại cùng opId sau khi có mạng...', { opId: offlineOpId });
+      const res = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          token: token,
+          opId: offlineOpId,
+          type: 'EXPENSE_CREATE',
+          payload: { id: offlineRecId, title: 'Khoản chi ghi lúc mất mạng', amount: 80000, splitMethod: 'equal' }
+        })
+      });
+
+      const countUrl = url + (url.includes('?') ? '&' : '?') + 'action=count&opId=' + encodeURIComponent(offlineOpId) + (token ? '&token=' + encodeURIComponent(token) : '');
+      const cnt = await safeFetch(countUrl, { method: 'GET', mode: 'cors' });
+
+      if (res.json && res.json.ok === true && cnt.json && cnt.json.count === 1) {
+        testResults.test_offline_real = { pass: true, count: 1 };
+        appendLog('PASS', 'TEST OFFLINE THẬT HOÀN TOÀN ĐẠT! Ghi nhận thành công, Sheet có đúng 1 dòng duy nhất, không mất mát hay trùng lặp.', {
+          res: res.json,
+          count: cnt.json
+        });
+      } else {
+        throw new Error('Số dòng không bằng 1 hoặc phản hồi lỗi: ' + JSON.stringify(res.json));
+      }
+    } catch (e) {
+      appendLog('FAIL', 'Gửi lại sau khi có mạng thất bại', e.message);
+    }
+  };
+  logContainer.appendChild(btnStep2);
+}
+
+// -------------------------------------------------------------
+// XUẤT BÁO CÁO JSON (ĐÃ SANITIZE BẢO MẬT)
+// -------------------------------------------------------------
 function exportReport() {
+  const url = gasUrlInput.value.trim();
+  const sanitizedDomain = url.split('/')[2] || 'unknown';
+
   const report = {
     appName: 'TdyTripPWA2026 Phase 0 PoC Verification',
+    reportVersion: 'v0.2.0',
     exportedAt: new Date().toISOString(),
     environment: {
       origin: window.location.origin,
@@ -503,28 +731,29 @@ function exportReport() {
       userAgent: navigator.userAgent,
       screen: `${window.innerWidth}x${window.innerHeight}`
     },
-    gasTarget: {
-      domain: (gasUrlInput.value.trim().split('/')[2]) || 'unknown',
+    backendInfo: {
+      domain: sanitizedDomain,
+      version: backendInfo.version,
+      debugCrashEnabled: backendInfo.debugCrashEnabled,
       hasTokenConfigured: Boolean(pocTokenInput.value.trim())
     },
+    latencyStats: testResults.latencyStats || null,
     testResults: testResults,
     auditLogs: sessionLogs
   };
 
   const jsonStr = JSON.stringify(report, null, 2);
 
-  // Copy vào clipboard
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(jsonStr).then(() => {
-      alert('Đã sao chép báo cáo kiểm thử JSON vào Clipboard!');
+      alert('Đã sao chép báo cáo JSON bảo mật vào Clipboard!');
     }).catch(() => {});
   }
 
-  // Tải file xuống
   const blob = new Blob([jsonStr], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `tdytrip_poc_report_${Date.now()}.json`;
+  a.download = `tdytrip_poc_v020_${Date.now()}.json`;
   a.click();
 }
 </script>

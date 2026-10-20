@@ -1,17 +1,38 @@
-# TdyTripPWA2026 — Phase 0: Quy Trình Kiểm Định PoC GAS Thực Tế
+# TdyTripPWA2026 — Phase 0: Quy Trình Kiểm Định PoC GAS & Trạng Thái Nghiệm Thu
 
-> **Quy định nghiêm ngặt**: Chỉ khi toàn bộ 5 bài test trong công cụ PoC này đạt **PASS trên môi trường Vercel thực tế (cả Safari iOS và Chrome Android)**, dự án mới được phép bắt đầu Giai đoạn 1. Tuyệt đối không kiểm thử bằng giao thức `file://`.
+> [!CAUTION]
+> **TRẠNG THÁI HIỆN TẠI: PHASE 0 CHƯA ĐÓNG — TUYỆT ĐỐI CHƯA SANG PHASE 1.**  
+> - **Chrome Android**: Đã ĐẠT 5/5 trong phiên bản v0.1.0 (`type=cors`, `redirected=true`, `count=1`, `stale rev OK`, `tombstone OK`).  
+> - **Safari iOS**: **CHƯA KIỂM THỬ**. Do cơ chế WebKit/Safari có thể có hành vi chuyển hướng 302 và CORS cookie khác biệt, dự án bắt buộc phải có kết quả nghiệm thu trên Safari iOS thực tế mới đủ điều kiện đóng Phase 0.
 
 ---
 
-## 1. Thiết Lập Google Apps Script (Backend)
+## 1. Nhật Ký & Danh Mục Cần Kiểm Thử Trên Safari iOS (Sẽ Thực Hiện)
+
+Khi có thiết bị iOS, mở link triển khai trên Safari và chạy tuần tự các bài kiểm tra sau trong [poc/gas_test.html](file:///d:/Project/GAntigravity/Projects_Active/TdyCompany/TdyTripPWA2026/poc/gas_test.html):
+
+| STT | Bài Kiểm Thử Trên Safari iOS | Điều Kiện ĐẠT (PASS) |
+| :---: | :--- | :--- |
+| **1** | **GET Ping, Token & CORS** | `res.ok === true`, đọc được JSON qua CORS, không bị chặn bởi WebKit ITP. |
+| **2** | **Validation & Error Replay** | Gửi amount âm ⟶ Server trả `ERR_VALIDATION`. Gửi lại cùng `opId` ⟶ Replay đúng lỗi cũ, không mồ côi `PENDING_APPLY`. |
+| **3** | **POST CREATE & ID Conflict** | Tạo bản ghi mới thành công (`rev = 1`). Cố tình gửi bản ghi trùng ID khác `opId` ⟶ Nhận đúng `ERR_ID_CONFLICT`. |
+| **4** | **Concurrency & Stale Revision** | Client B sửa lên `rev = 2`. Client A sửa với `expectedRev = 1` ⟶ Bị từ chối `ERR_STALE_REV` kèm `currentRecord`. Replay thao tác cũ vẫn trả về lỗi cũ. |
+| **5** | **DELETE Tombstone** | Xóa bản ghi với `expectedRev = 2` ⟶ Server đánh dấu `deleted = true, rev = 3`. |
+| **6** | **Đo Đạc Latency (10 Lần)** | Ghi nhận thời gian `p50` và `p95` trên mạng di động iOS. |
+| **7** | **Test Offline Thật (Airplane Mode)** | Bật chế độ máy bay ⟶ Bấm gửi ⟶ Bắt được lỗi mạng ⟶ Tắt chế độ máy bay ⟶ Gửi lại cùng `opId` ⟶ `count === 1`. |
+
+Sau khi chạy xong, bấm **"Xuất Báo Cáo JSON"** trên Safari và lưu lại file báo cáo.
+
+---
+
+## 2. Thiết Lập Google Apps Script (Mã Mới v0.2.0-wal-sweep)
 
 1. Mở Google Sheet dự án trên Google Drive.
 2. Mở **Tiện ích mở rộng** ⟶ **Apps Script**.
 3. Dán toàn bộ mã nguồn từ tệp [poc/Code.gs](file:///d:/Project/GAntigravity/Projects_Active/TdyCompany/TdyTripPWA2026/poc/Code.gs).
 4. Cấu hình **Cài đặt dự án (Project Settings)** ⟶ **Các thuộc tính tập lệnh (Script Properties)**:
-   - `POC_TOKEN` (Khuyên dùng): Đặt một chuỗi bí mật (ví dụ: `tdy_secret_2026_xyz`). Nếu để trống, backend sẽ không kiểm tra token.
-   - `DEBUG_CRASH_ENABLED`: Đặt `false` (mặc định tắt; chỉ bật `true` khi muốn thử nghiệm mô phỏng crash server).
+   - `POC_TOKEN`: Đặt một chuỗi bí mật (ví dụ: `tdy_secret_2026_xyz`). *Bắt buộc cấu hình để bảo vệ cả GET và POST.*
+   - `DEBUG_CRASH_ENABLED`: Đặt `false` (mặc định tắt; chỉ bật `true` khi muốn thử nghiệm bài Test 6 mô phỏng crash server).
 5. Nhấn **Triển khai (Deploy)** ⟶ **Triển khai mới (New deployment)**:
    - Loại: **Ứng dụng web (Web app)**.
    - Thực thi dưới dạng: **Tôi (Me)**.
@@ -19,48 +40,43 @@
 6. Sao chép Deployment URL (`https://script.google.com/macros/s/.../exec`).
 
 > [!WARNING]
-> Nếu bạn đã từng public hoặc commit URL Web App cũ lên git/chat, hãy thu hồi (Archive) bản triển khai đó và tạo bản mới (Rotate URL) để bảo đảm an toàn.
+> **THU HỒI & ĐỔI URL (ROTATE DEPLOYMENT URL)**:  
+> URL Web App cũ đã xuất hiện trong log/chat trước đây. Bạn **bắt buộc phải vào Deploy ⟶ Manage Deployments ⟶ Archive URL cũ** và tạo một Deployment URL mới tinh để ngăn chặn rò rỉ dữ liệu.
 
 ---
 
-## 2. Triển Khai Kiểm Thử Trực Tiếp (Không Dùng `file://`)
+## 3. Kiến Trúc WAL Sweep & Idempotency v0.2.0
 
-Trình duyệt đối xử với nguồn `file://` là `Origin: null`, có hành vi CORS khác hoàn toàn so với web app chạy trên domain HTTPS thực tế.
+Phiên bản `v0.2.0-wal-sweep` giải quyết triệt để bài toán: **Client A gửi ghi nghiệp vụ xong nhưng server crash trước khi kịp ghi History ACKED ⟶ Client B vào cập nhật đè (`last_op_id` bị thay đổi) ⟶ Client A retry**.
 
-### Cách triển khai để kiểm thử trên Mobile:
-1. Đưa thư mục `TdyTripPWA2026` lên GitHub và liên kết Vercel, hoặc dùng local HTTP server có HTTPS qua Cloudflare Tunnel / ngrok.
-2. Truy cập đường dẫn: `https://<ten-mien-vercel>/poc/gas_test.html`.
-3. Nhập URL GAS và Token bảo mật (được lưu an toàn vào `localStorage`, không hardcode vào mã nguồn).
-4. Bấm **"Chạy Toàn Bộ Kiểm Thử (1 ⟶ 5)"**.
-
----
-
-## 3. Nội Dung 5 Bài Test & Tiêu Chí Nghiệm Thu
-
-| Bài Test | Kịch bản Kiểm Thử | Điều kiện ĐẠT (PASS) |
-| :--- | :--- | :--- |
-| **Test 1: GET Ping & CORS** | Gửi `GET ?action=ping` | Trình duyệt đọc được JSON, `res.ok === true`, `data.ok === true`, ghi nhận đúng thời gian phản hồi. |
-| **Test 2: POST CREATE** | Gửi mutation tạo khoản chi mới với `opId_1` | Trả về `ok: true`, nhận đủ thực thể `record` (`rev = 1`, `created_op_id = opId_1`, `amount = 50000`). |
-| **Test 3: Lost-Response & Idempotency Count** | Gửi `opId_2` bị ngắt client giữa chừng (mô phỏng timeout mất mạng) ⟶ Gửi lại CÙNG `opId_2` | Server trả về `{ ok: true, duplicate: true }` kèm đủ `record`. Gọi `GET ?action=count&opId=opId_2` **bắt buộc trả về đúng count = 1**, không được có 2 dòng trong Sheet. |
-| **Test 4: Concurrency & Stale Revision** | Client B sửa bản ghi lên `rev = 2`. Client A (chưa cập nhật) cố tình sửa với `expectedRev = 1` | Server **bắt buộc từ chối** với lỗi `ERR_STALE_REV` và gửi kèm `currentRecord (rev = 2)` để Client A thấy. Replay op của B nhận `duplicate: true`. |
-| **Test 5: DELETE Tombstone** | Gửi xóa bản ghi với `expectedRev = 2` | Server trả về `deleted = true, rev = 3`. Không xóa vật lý dòng trong Sheet để tránh làm mất vết đồng bộ. |
+- **Quy trình Sweep đầu request**:
+  - Mỗi khi có bất kỳ request nào đến, sau khi có Lock, server quét toàn bộ dòng `PENDING_APPLY` trong History.
+  - Nếu row nghiệp vụ tương ứng đã có dữ liệu khớp `opId` ⟶ Server chốt dòng đó thành `ACKED` kèm kết quả JSON.
+  - Nếu row nghiệp vụ chưa có ⟶ Server đánh dấu `ABORTED`.
+  - Nhờ vậy, dòng của A đã được chốt `ACKED` ngay trước khi B kịp ghi đè, loại bỏ 100% hiện tượng mất vết hoặc báo lỗi `ERR_STALE_REV` giả cho A.
+- **Không để PENDING_APPLY mồ côi khi lỗi**:
+  - Mọi nhánh từ chối nghiệp vụ (`ERR_STALE_REV`, `ERR_VALIDATION`, `ERR_ID_CONFLICT`, `ERR_NOT_FOUND`) đều lập tức cập nhật History dòng đó sang `REJECTED` kèm thông tin lỗi.
+  - Khi retry cùng `opId`, server trả về đúng lỗi cũ đã lưu, bảo đảm tính Idempotent Replay.
 
 ---
 
-## 4. Giới Hạn Kiến Trúc Cần Biết
+## 4. Ghi Nhận Latency & Tác Động Lên Kiến Trúc Phase 3
 
-1. **Hiệu năng quét $O(N)$ trên Google Sheets**:
-   - Backend sử dụng `getDataRange().getValues()` nạp mảng vào bộ nhớ RAM của Apps Script để quét tra cứu `opId` và `expectedRev`.
-   - Đối với chuyến đi du lịch nhóm thông thường (< 1.000 khoản chi), thời gian quét mảng trong RAM mất < 50ms, hoàn toàn đáp ứng tốt.
-   - Nếu dữ liệu vượt quá 5.000 dòng, thời gian đọc dữ liệu từ Sheets sẽ tiến gần đến giới hạn timeout 30 giây của Web App. Khi đó cần phương án lưu trữ cơ sở dữ liệu chuyên dụng hoặc lưu trữ phân trang.
-2. **Bảo mật phân quyền mềm (Soft Permission)**:
-   - Trong khuôn khổ MVP cho nhóm bạn tin cậy, định danh `actorId` được gửi từ client, không qua xác thực mật mã RSA/JWT.
-   - `POC_TOKEN` đóng vai trò khóa bảo vệ cấp ứng dụng (Application Secret), ngăn chặn các truy cập ngoài nhóm.
+- **Đo đạc thực tế trên Android**: Thời gian phản hồi trung bình dao động từ **2,0s đến 3,7s** cho mỗi lời gọi API qua GAS.
+- **Tác động lên Hàng Đợi (FIFO Push)**:
+  - Nếu người dùng offline và tạo 5–10 khoản chi liên tiếp, khi có mạng, việc đẩy tuần tự 10 request riêng lẻ sẽ mất **20–35 giây**.
+  - Đây là thời gian chờ quá lâu trên thiết bị di động.
+- **Quyết định kiến trúc cho Phase 3**:
+  - Không đẩy đơn lẻ từng thao tác khi hàng đợi có nhiều hơn 1 phần tử.
+  - Thiết kế endpoint **Batch Mutation**: Gộp toàn bộ mảng `pending_ops` vào 1 request POST duy nhất. Server lấy lock 1 lần, duyệt qua mảng trong 1 execution duy nhất, giảm tổng thời gian đồng bộ xuống còn ~3–4 giây.
 
 ---
 
-## 5. Xuất Báo Cáo Nghiệm Thu
+## 5. Giới Hạn Kiến Trúc & Ranh Giới Bảo Mật
 
-Sau khi chạy xong trên điện thoại, bấm nút **"Xuất Báo Cáo JSON"**:
-- Tự động sao chép JSON kết quả chi tiết (gồm User-Agent, Origin, thời gian từng request, chi tiết response) vào Clipboard.
-- Dán nội dung báo cáo này vào khung chat để làm căn cứ chính thức nghiệm thu Giai đoạn 0.
+1. **Hiệu năng quét $O(N)$ trong RAM Apps Script**:
+   - Quét mảng trong RAM (`getValues()`) đối với < 1.000 khoản chi mất < 50ms, hoàn toàn đáp ứng tốt nhu cầu du lịch nhóm.
+   - Nếu dữ liệu > 5.000 dòng, thời gian đọc dữ liệu Sheets sẽ tiến gần đến giới hạn timeout 30s của GAS. Khi đó cần cơ chế lưu trữ phân trang hoặc database độc lập.
+2. **Ranh giới bảo mật MVP**:
+   - `actorId` được gửi từ client, mang tính định danh phân quyền mềm trong nhóm bạn tin cậy, không phải chứng thực mật mã RSA/JWT.
+   - Khóa bảo vệ thực sự nằm ở `POC_TOKEN` ngăn truy cập từ bên ngoài.
