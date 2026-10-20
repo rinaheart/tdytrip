@@ -217,30 +217,56 @@ function genOpId(prefix) {
   return (prefix || 'op') + '-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8);
 }
 
-async function safeFetch(url, options) {
+function sanitizeUrl(rawUrl) {
+  if (!rawUrl) return '';
+  try {
+    const u = new URL(rawUrl);
+    if (u.searchParams.has('user_content_key')) u.searchParams.set('user_content_key', '[REDACTED]');
+    if (u.searchParams.has('token')) u.searchParams.set('token', '[REDACTED]');
+    return u.toString();
+  } catch (e) {
+    return rawUrl.split('?')[0];
+  }
+}
+
+async function safeFetch(url, options, timeoutMs = 35000) {
   const start = performance.now();
   if (options && options.mode === 'no-cors') {
     throw new Error('mode: no-cors bị nghiêm cấm trong PoC này.');
   }
 
-  const res = await fetch(url, options);
-  const durationMs = Math.round(performance.now() - start);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const fetchOpts = Object.assign({}, options, { signal: controller.signal });
 
-  const meta = {
-    status: res.status,
-    statusText: res.statusText,
-    type: res.type,
-    redirected: res.redirected,
-    url: res.url,
-    durationMs: durationMs
-  };
+  try {
+    const res = await fetch(url, fetchOpts);
+    clearTimeout(timer);
+    const durationMs = Math.round(performance.now() - start);
 
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} (${res.statusText}) sau ${durationMs}ms`);
+    const meta = {
+      status: res.status,
+      statusText: res.statusText,
+      type: res.type,
+      redirected: res.redirected,
+      url: sanitizeUrl(res.url),
+      durationMs: durationMs
+    };
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} (${res.statusText}) sau ${durationMs}ms`);
+    }
+
+    const json = await res.json();
+    return { res: res, json: json, meta: meta };
+  } catch (err) {
+    clearTimeout(timer);
+    const durationMs = Math.round(performance.now() - start);
+    if (err.name === 'AbortError') {
+      throw new Error(`Request timeout sau ${durationMs}ms (vượt ngưỡng client timeout ${timeoutMs}ms)`);
+    }
+    throw err;
   }
-
-  const json = await res.json();
-  return { res: res, json: json, meta: meta };
 }
 
 async function runAutomatedSuite() {
@@ -480,6 +506,48 @@ async function runAutomatedSuite() {
       } else {
         throw new Error('DELETE không trả về tombstone hợp lệ: ' + JSON.stringify(t5.json));
       }
+
+      // -------------------------------------------------------------
+      // TEST 5b: Cố tình UPDATE hoặc DELETE bản ghi đã xóa (ERR_ALREADY_DELETED)
+      // -------------------------------------------------------------
+      appendLog('INFO', 'Test 5b: Thử UPDATE và DELETE trên bản ghi đã Tombstone (Kỳ vọng ERR_ALREADY_DELETED)');
+      const op5b_upd = genOpId('op-upd-del');
+      const t5b_upd = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          token: token,
+          opId: op5b_upd,
+          type: 'EXPENSE_UPDATE',
+          payload: { id: testRecId, expectedRev: 3, title: 'Cố tình sửa bản ghi đã xóa' }
+        })
+      });
+      if (t5b_upd.json && t5b_upd.json.ok === false && t5b_upd.json.error === 'ERR_ALREADY_DELETED') {
+        appendLog('PASS', 'Test 5b-1 ĐẠT: Server từ chối UPDATE bản ghi đã xóa (ERR_ALREADY_DELETED)');
+      } else {
+        throw new Error('Server không trả ERR_ALREADY_DELETED khi UPDATE: ' + JSON.stringify(t5b_upd.json));
+      }
+
+      const op5b_del = genOpId('op-del-del');
+      const t5b_del = await safeFetch(url, {
+        method: 'POST',
+        mode: 'cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({
+          token: token,
+          opId: op5b_del,
+          type: 'EXPENSE_DELETE',
+          payload: { id: testRecId, expectedRev: 3 }
+        })
+      });
+      if (t5b_del.json && t5b_del.json.ok === false && t5b_del.json.error === 'ERR_ALREADY_DELETED') {
+        testResults.test5_delete.alreadyDeletedCheck = true;
+        appendLog('PASS', 'Test 5b-2 ĐẠT: Server từ chối DELETE lại bản ghi đã xóa (ERR_ALREADY_DELETED)');
+      } else {
+        throw new Error('Server không trả ERR_ALREADY_DELETED khi DELETE lại: ' + JSON.stringify(t5b_del.json));
+      }
+
     } catch (e5) {
       testResults.test5_delete = { pass: false, error: e5.message };
       appendLog('FAIL', 'Test 5 THẤT BẠI', e5.message);
@@ -492,11 +560,10 @@ async function runAutomatedSuite() {
     if (backendInfo.debugCrashEnabled) {
       appendLog('INFO', 'Test 6: Mô phỏng Crash Server có kiểm soát (DEBUG_CRASH_ENABLED=true)');
       try {
+        // 6a: Crash SAU KHI ghi row nghiệp vụ nhưng trước ACKED
         const opCrashA = genOpId('op-crash-A');
-        const recCrashA = 'rec-crash-' + Date.now();
-        
-        // 6a: Mô phỏng sau khi ghi business row thì server sập trước khi chốt ACKED
-        appendLog('INFO', 'Test 6a: Gửi mutation với debugCrash="afterBusinessWrite"...');
+        const recCrashA = 'rec-crash-A-' + Date.now();
+        appendLog('INFO', 'Test 6a: Mô phỏng crash sau khi ghi business row (debugCrash="afterBusinessWrite")...');
         try {
           await safeFetch(url, {
             method: 'POST',
@@ -506,33 +573,30 @@ async function runAutomatedSuite() {
               token: token,
               opId: opCrashA,
               type: 'EXPENSE_CREATE',
-              payload: { id: recCrashA, title: 'Crash Test', amount: 50000, splitMethod: 'equal' },
+              payload: { id: recCrashA, title: 'Crash After Write', amount: 50000, splitMethod: 'equal' },
               debugCrash: 'afterBusinessWrite'
             })
           });
         } catch (simErr) {
-          appendLog('WARN', 'Server đã crash đúng như mô phỏng (HTTP error bắt được).', simErr.message);
+          appendLog('WARN', 'Server crash hợp lệ theo kịch bản afterBusinessWrite.', simErr.message);
         }
 
-        // 6b: Client B gửi 1 thao tác khác để kích hoạt SWEEP RECOVERY của server
-        const opDummyB = genOpId('op-dummy-B');
-        const recDummyB = 'rec-dummy-' + Date.now();
-        appendLog('INFO', 'Test 6b: Client B gửi mutation mới để kích hoạt Sweep PENDING_APPLY...');
+        // Dummy op kích hoạt sweep
+        const opDummy1 = genOpId('op-dummy-1');
         await safeFetch(url, {
           method: 'POST',
           mode: 'cors',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({
             token: token,
-            opId: opDummyB,
+            opId: opDummy1,
             type: 'EXPENSE_CREATE',
-            payload: { id: recDummyB, title: 'Dummy B', amount: 20000, splitMethod: 'equal' }
+            payload: { id: 'rec-dummy-1-' + Date.now(), title: 'Dummy Trigger Sweep', amount: 10000, splitMethod: 'equal' }
           })
         });
 
-        // 6c: Client A thử lại cùng opCrashA -> Server BẮT BUỘC trả về kết quả đã swept ACKED, count = 1
-        appendLog('INFO', 'Test 6c: Client A gửi lại opCrashA sau khi server đã sweep...');
-        const t6c = await safeFetch(url, {
+        // Client A retry -> Bắt buộc chốt ACKED
+        const t6a = await safeFetch(url, {
           method: 'POST',
           mode: 'cors',
           headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -540,22 +604,116 @@ async function runAutomatedSuite() {
             token: token,
             opId: opCrashA,
             type: 'EXPENSE_CREATE',
-            payload: { id: recCrashA, title: 'Crash Test', amount: 50000, splitMethod: 'equal' }
+            payload: { id: recCrashA, title: 'Crash After Write', amount: 50000, splitMethod: 'equal' }
           })
         });
 
-        const countUrl = url + (url.includes('?') ? '&' : '?') + 'action=count&opId=' + encodeURIComponent(opCrashA) + (token ? '&token=' + encodeURIComponent(token) : '');
+        if (t6a.json && t6a.json.ok === true && t6a.json.duplicate === true) {
+          appendLog('PASS', 'Test 6a ĐẠT: Sweep chốt ACKED thành công sau crash afterBusinessWrite.');
+        } else {
+          throw new Error('Test 6a thất bại: ' + JSON.stringify(t6a.json));
+        }
+
+        // 6b: Crash SAU KHI ACKED nhưng trước khi trả HTTP response
+        const opCrashB = genOpId('op-crash-B');
+        const recCrashB = 'rec-crash-B-' + Date.now();
+        appendLog('INFO', 'Test 6b: Mô phỏng crash sau ACKED (debugCrash="afterAck")...');
+        try {
+          await safeFetch(url, {
+            method: 'POST',
+            mode: 'cors',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({
+              token: token,
+              opId: opCrashB,
+              type: 'EXPENSE_CREATE',
+              payload: { id: recCrashB, title: 'Crash After Ack', amount: 60000, splitMethod: 'equal' },
+              debugCrash: 'afterAck'
+            })
+          });
+        } catch (simErrB) {
+          appendLog('WARN', 'Server crash hợp lệ theo kịch bản afterAck.', simErrB.message);
+        }
+
+        const t6b = await safeFetch(url, {
+          method: 'POST',
+          mode: 'cors',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            token: token,
+            opId: opCrashB,
+            type: 'EXPENSE_CREATE',
+            payload: { id: recCrashB, title: 'Crash After Ack', amount: 60000, splitMethod: 'equal' }
+          })
+        });
+        if (t6b.json && t6b.json.ok === true && t6b.json.duplicate === true && t6b.json.source === 'history_acked') {
+          appendLog('PASS', 'Test 6b ĐẠT: Replay sau crash afterAck trả đúng history_acked.');
+        } else {
+          throw new Error('Test 6b thất bại: ' + JSON.stringify(t6b.json));
+        }
+
+        // 6c: Crash TRƯỚC KHI ghi row nghiệp vụ -> Sweep đánh ABORTED -> Retry BẮT BUỘC thực thi lại (ACKED)!
+        const opCrashC = genOpId('op-crash-C');
+        const recCrashC = 'rec-crash-C-' + Date.now();
+        appendLog('INFO', 'Test 6c: Mô phỏng crash trước khi ghi business row (debugCrash="beforeBusinessWrite")...');
+        try {
+          await safeFetch(url, {
+            method: 'POST',
+            mode: 'cors',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({
+              token: token,
+              opId: opCrashC,
+              type: 'EXPENSE_CREATE',
+              payload: { id: recCrashC, title: 'Crash Before Business Write', amount: 70000, splitMethod: 'equal' },
+              debugCrash: 'beforeBusinessWrite'
+            })
+          });
+        } catch (simErrC) {
+          appendLog('WARN', 'Server crash hợp lệ theo kịch bản beforeBusinessWrite.', simErrC.message);
+        }
+
+        // Dummy op kích hoạt sweep đánh opCrashC thành ABORTED
+        const opDummy2 = genOpId('op-dummy-2');
+        await safeFetch(url, {
+          method: 'POST',
+          mode: 'cors',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            token: token,
+            opId: opDummy2,
+            type: 'EXPENSE_CREATE',
+            payload: { id: 'rec-dummy-2-' + Date.now(), title: 'Dummy Trigger Sweep 2', amount: 10000, splitMethod: 'equal' }
+          })
+        });
+
+        // Client A retry lại cùng opCrashC -> Server KHÔNG ĐƯỢC từ chối retryable:false mà PHẢI áp dụng thành công lên ACKED!
+        appendLog('INFO', 'Test 6c: Client A retry opCrashC sau khi đã bị sweep ABORTED...');
+        const t6c = await safeFetch(url, {
+          method: 'POST',
+          mode: 'cors',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({
+            token: token,
+            opId: opCrashC,
+            type: 'EXPENSE_CREATE',
+            payload: { id: recCrashC, title: 'Crash Before Business Write', amount: 70000, splitMethod: 'equal' }
+          })
+        });
+
+        const countUrl = url + (url.includes('?') ? '&' : '?') + 'action=count&opId=' + encodeURIComponent(opCrashC) + (token ? '&token=' + encodeURIComponent(token) : '');
         const c6 = await safeFetch(countUrl, { method: 'GET', mode: 'cors' });
 
-        if (t6c.json && t6c.json.ok === true && t6c.json.duplicate === true && c6.json && c6.json.count === 1) {
-          testResults.test6_crash_recovery = { pass: true, count: 1 };
-          appendLog('PASS', 'Test 6 ĐẠT: Crash recovery sweep hoạt động hoàn hảo! Đúng 1 bản ghi duy nhất, A nhận kết quả ACKED sau khi B ghi đè.', {
+        if (t6c.json && t6c.json.ok === true && c6.json && c6.json.count === 1) {
+          testResults.test6_crash_recovery = { pass: true, count: 1, abortedReplayFixVerified: true };
+          appendLog('PASS', 'Test 6c ĐẠT: Thao tác bị ABORTED đã được thực thi lại thành công khi retry! count=1.', {
             response: t6c.json,
-            countResult: c6.json
+            count: c6.json
           });
         } else {
-          throw new Error('Crash recovery thất bại hoặc trùng dòng: ' + JSON.stringify(t6c.json));
+          throw new Error('Test 6c thất bại (Bị từ chối hoặc count != 1): ' + JSON.stringify(t6c.json));
         }
+
       } catch (e6) {
         testResults.test6_crash_recovery = { pass: false, error: e6.message };
         appendLog('FAIL', 'Test 6 THẤT BẠI', e6.message);
@@ -750,10 +908,14 @@ function exportReport() {
     }).catch(() => {});
   }
 
+  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  const devType = isIOS ? 'ios' : (isAndroid ? 'android' : 'desktop');
+
   const blob = new Blob([jsonStr], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `tdytrip_poc_v020_${Date.now()}.json`;
+  a.download = `poc_report_${devType}_${Date.now()}.json`;
   a.click();
 }
 </script>

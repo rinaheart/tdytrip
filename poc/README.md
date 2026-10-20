@@ -1,82 +1,71 @@
 # TdyTripPWA2026 — Phase 0: Quy Trình Kiểm Định PoC GAS & Trạng Thái Nghiệm Thu
 
 > [!CAUTION]
-> **TRẠNG THÁI HIỆN TẠI: PHASE 0 CHƯA ĐÓNG — TUYỆT ĐỐI CHƯA SANG PHASE 1.**  
-> - **Chrome Android**: Đã ĐẠT 5/5 trong phiên bản v0.1.0 (`type=cors`, `redirected=true`, `count=1`, `stale rev OK`, `tombstone OK`).  
-> - **Safari iOS**: **CHƯA KIỂM THỬ**. Do cơ chế WebKit/Safari có thể có hành vi chuyển hướng 302 và CORS cookie khác biệt, dự án bắt buộc phải có kết quả nghiệm thu trên Safari iOS thực tế mới đủ điều kiện đóng Phase 0.
+> **TRẠNG THÁI HIỆN TẠI: PHASE 0 VẪN CHƯA PASS — TUYỆT ĐỐI CHƯA SANG PHASE 1.**  
+> - Báo cáo Playwright là **kiểm thử giả lập desktop (Desktop Browser Emulation)**, KHÔNG PHẢI thiết bị di động thật.  
+> - Cấm dùng kết quả Playwright để tuyên bố "PASS Android" hoặc "PASS iOS".  
+> - **4 Điều Kiện Bắt Buộc Để Đóng Phase 0**:
+>   1. **Báo cáo từ Chrome Android thật** chạy sạch 100%, giải thích/xác nhận không tái hiện 2 lỗi ngắt quãng cũ (`ERR_UNAUTHORIZED` ở 3b và `HTTP 404` ở Test 5).
+>   2. **Báo cáo từ Safari iOS thật** (chạy trên iPhone thực tế).
+>   3. **Kiểm chứng Test 6 Crash Simulation** (`afterBusinessWrite`, `afterAck`, và `beforeBusinessWrite` kiểm chứng bản vá `ABORTED` replay).
+>   4. **Triển khai bản vá `ABORTED` replay & `ERR_ALREADY_DELETED`** trên Apps Script backend.
 
 ---
 
-## 1. Nhật Ký & Danh Mục Cần Kiểm Thử Trên Safari iOS (Sẽ Thực Hiện)
+## 1. Bảo Mật & Quản Lý Bí Mật (P0 Security)
 
-Khi có thiết bị iOS, mở link triển khai trên Safari và chạy tuần tự các bài kiểm tra sau trong [poc/gas_test.html](file:///d:/Project/GAntigravity/Projects_Active/TdyCompany/TdyTripPWA2026/poc/gas_test.html):
-
-| STT | Bài Kiểm Thử Trên Safari iOS | Điều Kiện ĐẠT (PASS) |
-| :---: | :--- | :--- |
-| **1** | **GET Ping, Token & CORS** | `res.ok === true`, đọc được JSON qua CORS, không bị chặn bởi WebKit ITP. |
-| **2** | **Validation & Error Replay** | Gửi amount âm ⟶ Server trả `ERR_VALIDATION`. Gửi lại cùng `opId` ⟶ Replay đúng lỗi cũ, không mồ côi `PENDING_APPLY`. |
-| **3** | **POST CREATE & ID Conflict** | Tạo bản ghi mới thành công (`rev = 1`). Cố tình gửi bản ghi trùng ID khác `opId` ⟶ Nhận đúng `ERR_ID_CONFLICT`. |
-| **4** | **Concurrency & Stale Revision** | Client B sửa lên `rev = 2`. Client A sửa với `expectedRev = 1` ⟶ Bị từ chối `ERR_STALE_REV` kèm `currentRecord`. Replay thao tác cũ vẫn trả về lỗi cũ. |
-| **5** | **DELETE Tombstone** | Xóa bản ghi với `expectedRev = 2` ⟶ Server đánh dấu `deleted = true, rev = 3`. |
-| **6** | **Đo Đạc Latency (10 Lần)** | Ghi nhận thời gian `p50` và `p95` trên mạng di động iOS. |
-| **7** | **Test Offline Thật (Airplane Mode)** | Bật chế độ máy bay ⟶ Bấm gửi ⟶ Bắt được lỗi mạng ⟶ Tắt chế độ máy bay ⟶ Gửi lại cùng `opId` ⟶ `count === 1`. |
-
-Sau khi chạy xong, bấm **"Xuất Báo Cáo JSON"** trên Safari và lưu lại file báo cáo.
+1. **Bảo vệ Vercel Deployment**:
+   - Tệp `.vercelignore` và `.gitignore` đã chặn toàn bộ: `poc/poc_config.json`, `poc/.env`, `poc/reports/`, `poc/run_audit.py`, `poc/*.png`.
+   - Đã kiểm tra trực tiếp: Các file cấu hình và báo cáo trên Vercel đều trả về `404 Not Found`.
+2. **Quản lý Secrets cục bộ**:
+   - Lưu `GAS_URL` và `POC_TOKEN` trong file `poc/.env` (được `.gitignore` bảo vệ tuyệt đối).
+   - `poc/poc_config.example.json` chỉ chứa mẫu giả định, không lưu secret.
+3. **Thu hồi & Đổi URL (Rotate Deployment URL & Token)**:
+   - URL cũ và token 4 số đã xuất hiện trong log/chat.
+   - **Bắt buộc**: Vào Google Sheet ⟶ **Deploy** ⟶ **Manage Deployments** ⟶ **Archive URL cũ**.
+   - Tạo Deployment mới và cấu hình `POC_TOKEN` trong Script Properties thành chuỗi ngẫu nhiên $\ge 24$ ký tự (ví dụ: `tdy_live_sec_9f7a8b3c2d1e0f4a5b6c7d8e`).
 
 ---
 
-## 2. Thiết Lập Google Apps Script (Mã Mới v0.2.0-wal-sweep)
+## 2. Kiến Trúc Backend v0.2.1-wal-sweep-fix
 
-1. Mở Google Sheet dự án trên Google Drive.
-2. Mở **Tiện ích mở rộng** ⟶ **Apps Script**.
-3. Dán toàn bộ mã nguồn từ tệp [poc/Code.gs](file:///d:/Project/GAntigravity/Projects_Active/TdyCompany/TdyTripPWA2026/poc/Code.gs).
-4. Cấu hình **Cài đặt dự án (Project Settings)** ⟶ **Các thuộc tính tập lệnh (Script Properties)**:
-   - `POC_TOKEN`: Đặt một chuỗi bí mật (ví dụ: `tdy_secret_2026_xyz`). *Bắt buộc cấu hình để bảo vệ cả GET và POST.*
-   - `DEBUG_CRASH_ENABLED`: Đặt `false` (mặc định tắt; chỉ bật `true` khi muốn thử nghiệm bài Test 6 mô phỏng crash server).
-5. Nhấn **Triển khai (Deploy)** ⟶ **Triển khai mới (New deployment)**:
-   - Loại: **Ứng dụng web (Web app)**.
-   - Thực thi dưới dạng: **Tôi (Me)**.
-   - Ai có quyền truy cập: **Bất kỳ ai (Anyone)**.
-6. Sao chép Deployment URL (`https://script.google.com/macros/s/.../exec`).
+Bản cập nhật [poc/Code.gs](file:///d:/Project/GAntigravity/Projects_Active/TdyCompany/TdyTripPWA2026/poc/Code.gs) (`v0.2.1-wal-sweep-fix`) vá 2 lỗ hổng logic nghiêm ngặt:
 
-> [!WARNING]
-> **THU HỒI & ĐỔI URL (ROTATE DEPLOYMENT URL)**:  
-> URL Web App cũ đã xuất hiện trong log/chat trước đây. Bạn **bắt buộc phải vào Deploy ⟶ Manage Deployments ⟶ Archive URL cũ** và tạo một Deployment URL mới tinh để ngăn chặn rò rỉ dữ liệu.
+1. **Vá lỗi `ABORTED` Replay (P0)**:
+   - Khi server crash *trước* khi ghi dòng nghiệp vụ, sweep đầu request sẽ đánh dấu dòng `PENDING_APPLY` mồ côi thành `ABORTED`.
+   - **Lỗi cũ**: Khi client retry cùng `opId`, server trả về `CRASHABORTED` với `retryable: false`, khiến client bỏ cuộc và mất dữ liệu của người dùng.
+   - **Bản vá mới**: Thao tác ở trạng thái `ABORTED` khi retry được server chuyển lại thành `PENDING_APPLY` và **thực thi bình thường** lên `ACKED`. Chỉ `REJECTED` (lỗi validation/business vi phạm vĩnh viễn) mới replay lỗi cũ.
+2. **Ngăn chặn sửa/xóa bản ghi đã Tombstone (`ERR_ALREADY_DELETED`)**:
+   - Khi bản ghi đã có `deleted === true`, mọi yêu cầu `EXPENSE_UPDATE` hoặc `EXPENSE_DELETE` tiếp theo đều bị từ chối với mã lỗi `ERR_ALREADY_DELETED` (`retryable: false`), không tăng `rev`.
+3. **Mô phỏng Crash đầy đủ 3 kịch bản**:
+   - `afterBusinessWrite`: Crash sau khi ghi row nghiệp vụ nhưng trước ACKED.
+   - `afterAck`: Crash sau khi ghi History ACKED nhưng trước khi trả phản hồi HTTP.
+   - `beforeBusinessWrite`: Crash ngay sau khi ghi `PENDING_APPLY`, kiểm chứng khả năng hồi phục sau `ABORTED`.
 
 ---
 
-## 3. Kiến Trúc WAL Sweep & Idempotency v0.2.0
+## 3. Bộ Tự Động Hóa Hồi Quy Playwright (Smoke & Regression Runner)
 
-Phiên bản `v0.2.0-wal-sweep` giải quyết triệt để bài toán: **Client A gửi ghi nghiệp vụ xong nhưng server crash trước khi kịp ghi History ACKED ⟶ Client B vào cập nhật đè (`last_op_id` bị thay đổi) ⟶ Client A retry**.
+- **Mục đích**: Chạy lặp lại nhiều lần trên desktop để phát hiện sớm các lỗi hồi quy logic, lỗi concurrency, và lỗi mạng ngắt quãng.
+- **Thực thi**:
+  ```powershell
+  # Chạy 5 lần lặp lại trên cả Chromium Pixel 7 và WebKit iPhone 14
+  python poc/run_audit.py --browser both --repeat-each 5
 
-- **Quy trình Sweep đầu request**:
-  - Mỗi khi có bất kỳ request nào đến, sau khi có Lock, server quét toàn bộ dòng `PENDING_APPLY` trong History.
-  - Nếu row nghiệp vụ tương ứng đã có dữ liệu khớp `opId` ⟶ Server chốt dòng đó thành `ACKED` kèm kết quả JSON.
-  - Nếu row nghiệp vụ chưa có ⟶ Server đánh dấu `ABORTED`.
-  - Nhờ vậy, dòng của A đã được chốt `ACKED` ngay trước khi B kịp ghi đè, loại bỏ 100% hiện tượng mất vết hoặc báo lỗi `ERR_STALE_REV` giả cho A.
-- **Không để PENDING_APPLY mồ côi khi lỗi**:
-  - Mọi nhánh từ chối nghiệp vụ (`ERR_STALE_REV`, `ERR_VALIDATION`, `ERR_ID_CONFLICT`, `ERR_NOT_FOUND`) đều lập tức cập nhật History dòng đó sang `REJECTED` kèm thông tin lỗi.
-  - Khi retry cùng `opId`, server trả về đúng lỗi cũ đã lưu, bảo đảm tính Idempotent Replay.
-
----
-
-## 4. Ghi Nhận Latency & Tác Động Lên Kiến Trúc Phase 3
-
-- **Đo đạc thực tế trên Android**: Thời gian phản hồi trung bình dao động từ **2,0s đến 3,7s** cho mỗi lời gọi API qua GAS.
-- **Tác động lên Hàng Đợi (FIFO Push)**:
-  - Nếu người dùng offline và tạo 5–10 khoản chi liên tiếp, khi có mạng, việc đẩy tuần tự 10 request riêng lẻ sẽ mất **20–35 giây**.
-  - Đây là thời gian chờ quá lâu trên thiết bị di động.
-- **Quyết định kiến trúc cho Phase 3**:
-  - Không đẩy đơn lẻ từng thao tác khi hàng đợi có nhiều hơn 1 phần tử.
-  - Thiết kế endpoint **Batch Mutation**: Gộp toàn bộ mảng `pending_ops` vào 1 request POST duy nhất. Server lấy lock 1 lần, duyệt qua mảng trong 1 execution duy nhất, giảm tổng thời gian đồng bộ xuống còn ~3–4 giây.
+  # Chạy kiểm thử trên tất cả các engine kể cả Firefox
+  python poc/run_audit.py --browser all --repeat-each 5
+  ```
+- **Chức năng**:
+  - Tự động nạp cấu hình từ `poc/.env`.
+  - Tự động giả lập mất mạng (`context.set_offline(true)`), kiểm tra ngoại lệ mạng và thử lại (`replay`) khi có mạng trở lại, xác nhận `count === 1`.
+  - Ghi nhận chi tiết `attempt`, `durationMs`, và `opId` của mọi lần thất bại ngắt quãng.
+  - Tự động sanitize, redact `user_content_key` và token khỏi báo cáo JSON và ảnh chụp.
 
 ---
 
-## 5. Giới Hạn Kiến Trúc & Ranh Giới Bảo Mật
+## 4. Cảnh Báo Độ Trễ & Thiết Kế Hàng Đợi Phase 3
 
-1. **Hiệu năng quét $O(N)$ trong RAM Apps Script**:
-   - Quét mảng trong RAM (`getValues()`) đối với < 1.000 khoản chi mất < 50ms, hoàn toàn đáp ứng tốt nhu cầu du lịch nhóm.
-   - Nếu dữ liệu > 5.000 dòng, thời gian đọc dữ liệu Sheets sẽ tiến gần đến giới hạn timeout 30s của GAS. Khi đó cần cơ chế lưu trữ phân trang hoặc database độc lập.
-2. **Ranh giới bảo mật MVP**:
-   - `actorId` được gửi từ client, mang tính định danh phân quyền mềm trong nhóm bạn tin cậy, không phải chứng thực mật mã RSA/JWT.
-   - Khóa bảo vệ thực sự nằm ở `POC_TOKEN` ngăn truy cập từ bên ngoài.
+- **Độ trễ Desktop vô nghĩa với Mobile**: Desktop đo được 1.2–1.3s nhờ mạng cáp quang ổn định. Trên điện thoại thật ngoài đời, p95 đo được lên tới **18.7s**.
+- **Quy chuẩn Phase 3**:
+  - Timeout của client khi gọi GAS bắt buộc đặt **30–40s**.
+  - Khi hàng đợi có từ 2 thao tác trở lên: bắt buộc dùng **Batch Mutation** (gộp toàn bộ thao tác vào 1 request POST), giảm thời gian đồng bộ từ 30–60s xuống còn ~3–4s.

@@ -1,24 +1,28 @@
 /**
  * TdyTripPWA2026 — Phase 0 PoC Backend (Google Apps Script)
- * Version: v0.2.0-wal-sweep
+ * Version: v0.2.1-wal-sweep-fix
  * 
  * QUY TRÌNH GHI BẢO ĐẢM NGUYÊN TỬ & IDEMPOTENCY HOÀN CHỈNH:
  * 1. Kiểm tra Token bảo mật TRƯỚC KHI lấy Lock (chống kiệt quệ tài nguyên Lock).
  * 2. LockService: waitLock(20000) (trả retryable: true nếu timeout).
  * 3. SWEEP RECOVERY: Quét toàn bộ History 'PENDING_APPLY' mồ côi:
- *    - Nếu row nghiệp vụ còn op_id khớp -> Chốt ACKED + lưu record.
- *    - Nếu không khớp -> Chốt ABORTED.
- *    (Giải quyết triệt để kịch bản: A crash sau khi ghi -> B cập nhật đè -> A retry).
- * 4. Kiểm tra Idempotency Replay (ACKED -> replay kết quả; REJECTED/ABORTED -> replay lỗi cũ).
- * 5. Input Validation nghiêm ngặt -> Ghi REJECTED nếu sai dữ liệu, không để PENDING_APPLY mồ côi.
- * 6. Kiểm tra ID Conflict (CREATE trùng ID nhưng khác opId -> ERR_ID_CONFLICT).
- * 7. WAL Step 1: Ghi History 'PENDING_APPLY'.
- * 8. WAL Step 2: Ghi/Sửa/Xóa nghiệp vụ (rev+1, last_op_id).
- * 9. WAL Step 3: Cập nhật History 'ACKED' kèm JSON kết quả đầy đủ.
- * 10. SpreadsheetApp.flush() ép commit trước khi nhả Lock.
+ *    - Nếu row nghiệp vụ còn op_id khớp ⟶ Chốt ACKED + lưu record.
+ *    - Nếu không khớp ⟶ Chốt ABORTED.
+ *    (Giải quyết triệt để kịch bản: A crash sau khi ghi ⟶ B cập nhật đè ⟶ A retry).
+ * 4. Kiểm tra Idempotency Replay:
+ *    - ACKED ⟶ Replay kết quả thành công.
+ *    - REJECTED ⟶ Replay lỗi cũ (lỗi nghiệp vụ vĩnh viễn, retryable: false).
+ *    - ABORTED ⟶ Phục hồi PENDING_APPLY và cho phép thực thi lại (tránh mất op của user khi crash trước ghi).
+ * 5. Input Validation nghiêm ngặt ⟶ Ghi REJECTED nếu sai dữ liệu, không để PENDING_APPLY mồ côi.
+ * 6. Kiểm tra ID Conflict (CREATE trùng ID nhưng khác opId ⟶ ERR_ID_CONFLICT).
+ * 7. Kiểm tra Tombstone (UPDATE/DELETE trên bản ghi đã deleted ⟶ ERR_ALREADY_DELETED).
+ * 8. WAL Step 1: Ghi hoặc tái kích hoạt History 'PENDING_APPLY'.
+ * 9. WAL Step 2: Ghi/Sửa/Xóa nghiệp vụ (rev+1, last_op_id).
+ * 10. WAL Step 3: Cập nhật History 'ACKED' kèm JSON kết quả đầy đủ.
+ * 11. SpreadsheetApp.flush() ép commit trước khi nhả Lock.
  */
 
-var BACKEND_VERSION = 'v0.2.0-wal-sweep';
+var BACKEND_VERSION = 'v0.2.1-wal-sweep-fix';
 
 function doGet(e) {
   var scriptProps = PropertiesService.getScriptProperties();
@@ -130,6 +134,7 @@ function doPost(e) {
 
     // 4. KIỂM TRA IDEMPOTENCY TỪ HISTORY ĐÃ SWEEP
     var historyData = historySheet.getDataRange().getValues();
+    var existingAbortedRowIdx = -1;
     for (var h = 1; h < historyData.length; h++) {
       if (historyData[h][0] === opId) {
         var hStatus = historyData[h][2];
@@ -146,23 +151,46 @@ function doPost(e) {
             record: parsedRes,
             message: 'Thao tác đã được xác nhận thành công trước đó (Idempotent Replay).'
           });
-        } else if (hStatus === 'REJECTED' || hStatus === 'ABORTED') {
+        } else if (hStatus === 'REJECTED') {
+          // CHỈ REJECTED (lỗi nghiệp vụ/validation vĩnh viễn) mới replay lỗi cũ
           return sendJson(Object.assign({
             ok: false,
             duplicate: true,
-            source: 'history_' + hStatus.toLowerCase(),
+            source: 'history_rejected',
             opId: opId,
             retryable: false
           }, parsedRes));
+        } else if (hStatus === 'ABORTED') {
+          // P0 FIX: Thao tác bị ABORTED do crash trước khi ghi business row
+          // KHÔNG được trả retryable: false! Cho phép thực thi lại với cùng opId.
+          existingAbortedRowIdx = h + 1;
+          break;
         }
       }
     }
 
-    // 5. WAL BƯỚC 1: GHI NHẬN PENDING_APPLY VÀO HISTORY NGAY TỪ ĐẦU
+    // 5. WAL BƯỚC 1: GHI HOẶC TÁI KÍCH HOẠT PENDING_APPLY VÀO HISTORY
     var targetEntityId = payload.id || Utilities.getUuid();
-    historySheet.appendRow([opId, type, 'PENDING_APPLY', targetEntityId, new Date().toISOString(), JSON.stringify(payload), '']);
+    var currentHistoryRow;
+    if (existingAbortedRowIdx > 0) {
+      currentHistoryRow = existingAbortedRowIdx;
+      historySheet.getRange(currentHistoryRow, 2).setValue(type);
+      historySheet.getRange(currentHistoryRow, 3).setValue('PENDING_APPLY');
+      historySheet.getRange(currentHistoryRow, 4).setValue(targetEntityId);
+      historySheet.getRange(currentHistoryRow, 5).setValue(new Date().toISOString());
+      historySheet.getRange(currentHistoryRow, 6).setValue(JSON.stringify(payload));
+      historySheet.getRange(currentHistoryRow, 7).setValue('');
+    } else {
+      historySheet.appendRow([opId, type, 'PENDING_APPLY', targetEntityId, new Date().toISOString(), JSON.stringify(payload), '']);
+      currentHistoryRow = historySheet.getLastRow();
+    }
     SpreadsheetApp.flush();
-    var currentHistoryRow = historySheet.getLastRow();
+
+    // MÔ PHỎNG SỰ CỐ TRƯỚC KHI GHI BẢNG NGHIỆP VỤ (Debug Crash Simulator)
+    if (debugCrashAllowed && debugCrash === 'beforeBusinessWrite') {
+      SpreadsheetApp.flush();
+      throw new Error('SIMULATED_CRASH: Sau khi ghi PENDING_APPLY nhưng trước khi ghi row nghiệp vụ.');
+    }
 
     // 6. VALIDATION DỮ LIỆU ĐẦU VÀO NGHIÊM NGẶT
     var valErr = validatePayload(type, payload);
@@ -230,6 +258,11 @@ function doPost(e) {
         return rejectPendingOp(historySheet, currentHistoryRow, 'ERR_NOT_FOUND', 'Không tìm thấy bản ghi để cập nhật.');
       }
 
+      // P0 KIỂM TRA: BẢN GHI ĐÃ XÓA (TOMBSTONE) THÌ KHÔNG THỂ UPDATE
+      if (currentRec.deleted) {
+        return rejectPendingOp(historySheet, currentHistoryRow, 'ERR_ALREADY_DELETED', 'Không thể cập nhật bản ghi đã bị xóa.');
+      }
+
       // KIỂM TRA ĐỐI CHIẾU REVISION CHÍNH XÁC
       if (currentRec.rev !== expectedRev) {
         return rejectPendingOp(historySheet, currentHistoryRow, 'ERR_STALE_REV', 
@@ -278,6 +311,11 @@ function doPost(e) {
 
       if (!currentDelRec) {
         return rejectPendingOp(historySheet, currentHistoryRow, 'ERR_NOT_FOUND', 'Không tìm thấy bản ghi để xóa.');
+      }
+
+      // P0 KIỂM TRA: BẢN GHI ĐÃ XÓA (TOMBSTONE) THÌ KHÔNG THỂ XÓA TIẾP
+      if (currentDelRec.deleted) {
+        return rejectPendingOp(historySheet, currentHistoryRow, 'ERR_ALREADY_DELETED', 'Bản ghi đã bị xóa trước đó.');
       }
 
       if (currentDelRec.rev !== expDelRev) {
