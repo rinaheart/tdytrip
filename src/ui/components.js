@@ -5,6 +5,8 @@
  * Cung cấp tiện ích clipboard copy, toast notification, sync badges, conflict banners và hard lock (TRIP_COMPLETE).
  */
 
+import { BUILD_TAG } from '../version.js';
+
 // Format VND số nguyên với tabular-nums
 export function formatVND(amount) {
   if (typeof amount !== 'number' || isNaN(amount)) return '0 đ';
@@ -186,7 +188,10 @@ export function renderHeader(state) {
   return `
     <header class="app-header">
       <div class="header-title-group">
-        <h1>${escapeHTML(state.tripName)}</h1>
+        <div style="display: flex; align-items: baseline; gap: 8px;">
+          <h1>${escapeHTML(state.tripName)}</h1>
+          <span class="build-tag" style="font-size: 10px; color: var(--text-muted, #94a3b8); font-family: monospace; font-weight: normal; opacity: 0.7;">${BUILD_TAG}</span>
+        </div>
         <div class="trip-meta" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
           <span>${state.members.length} thành viên</span>
           <span>•</span>

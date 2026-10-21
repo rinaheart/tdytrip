@@ -18,10 +18,23 @@
 </head>
 <body>
   <div id="app" class="app-container">
-    <!-- App Shell dynamically rendered by src/app.js -->
+    <header class="app-header" style="opacity: 0.6;">
+      <div class="header-title-group">
+        <div style="display: flex; align-items: baseline; gap: 8px;">
+          <h1 style="font-size: 1.25rem; font-weight: 700; margin: 0;">TdyTrip</h1>
+          <span class="build-tag" style="font-size: 10px; color: #94a3b8; font-family: monospace;"></span>
+        </div>
+        <div class="trip-meta" style="font-size: 0.8rem; color: #94a3b8;">Đang tải ứng dụng...</div>
+      </div>
+    </header>
   </div>
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
+  <script type="module">
+    import { BUILD_TAG } from './src/version.js';
+    const tagEl = document.querySelector('.build-tag');
+    if (tagEl) tagEl.textContent = BUILD_TAG;
+  </script>
   <script type="module" src="./src/app.js"></script>
   <script>
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {

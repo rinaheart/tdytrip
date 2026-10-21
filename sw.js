@@ -8,7 +8,7 @@
  * 3. Hỗ trợ cập nhật tức thì (skipWaiting + clients.claim).
  */
 
-const CACHE_NAME = 'tdytrip-shell-v0.4.0';
+const CACHE_NAME = 'tdytrip-shell-v0.4.2-20261021_1506';
 
 const PRECACHE_ASSETS = [
   './',
@@ -16,6 +16,7 @@ const PRECACHE_ASSETS = [
   './manifest.webmanifest',
   './src/styles.css',
   './src/app.js',
+  './src/version.js',
   './src/core/math.js',
   './src/storage/db.js',
   './src/sync/engine.js',

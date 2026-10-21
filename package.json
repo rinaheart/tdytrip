@@ -10,6 +10,7 @@
     "test:storage": "node --test tests/storage.test.js",
     "test:fifo": "node --test tests/sync_fifo.test.js",
     "test:sync": "node --test tests/batch_sync.test.js",
-    "test:pwa": "node --test tests/pwa_batch.test.js"
+    "test:pwa": "node --test tests/pwa_batch.test.js",
+    "bump": "node scripts/bump_version.mjs"
   }
 }
