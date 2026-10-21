@@ -73,11 +73,29 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Đối với tài nguyên tĩnh (App Shell): Stale-While-Revalidate
+  // Đối với tài nguyên tĩnh (App Shell): Stale-While-Revalidate + Navigation Fallback
   event.respondWith(
     caches.match(req).then((cachedResponse) => {
-      const fetchPromise = fetch(req).then((networkResponse) => {
-        // Chỉ lưu vào cache nếu response hợp lệ và thuộc cùng origin
+      if (cachedResponse) {
+        // Có sẵn trong cache -> Phục vụ ngay, đồng thời revalidate ngầm
+        fetch(req).then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
+            const clone = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(req, clone));
+          }
+        }).catch(() => {});
+        return cachedResponse;
+      }
+
+      // Request navigation (F5 / tải trang khi offline) -> fallback về index.html trong cache
+      if (req.mode === 'navigate') {
+        return caches.match('./index.html').then((indexRes) => {
+          return indexRes || caches.match('/index.html') || fetch(req);
+        }).catch(() => fetch(req));
+      }
+
+      // Chưa có trong cache -> Fetch từ network và lưu vào cache
+      return fetch(req).then((networkResponse) => {
         if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
           const responseToCache = networkResponse.clone();
           caches.open(CACHE_NAME).then((cache) => {
@@ -85,11 +103,7 @@ self.addEventListener('fetch', (event) => {
           });
         }
         return networkResponse;
-      }).catch(() => {
-        // Mạng lỗi (Offline hoàn toàn) -> Đã có cachedResponse bên dưới phục vụ
       });
-
-      return cachedResponse || fetchPromise;
     })
   );
 });

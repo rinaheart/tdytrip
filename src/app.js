@@ -389,7 +389,7 @@ function registerServiceWorker() {
   const isSecure = window.location.protocol === 'https:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
   if (!isSecure) return;
 
-  window.addEventListener('load', () => {
+  const doRegister = () => {
     navigator.serviceWorker.register('./sw.js')
       .then((reg) => {
         console.log('[PWA] Service Worker đăng ký thành công với scope:', reg.scope);
@@ -407,7 +407,13 @@ function registerServiceWorker() {
       .catch((err) => {
         console.warn('[PWA] Đăng ký Service Worker thất bại:', err);
       });
-  });
+  };
+
+  if (document.readyState === 'complete') {
+    doRegister();
+  } else {
+    window.addEventListener('load', doRegister);
+  }
 }
 
 if (typeof document !== 'undefined') {

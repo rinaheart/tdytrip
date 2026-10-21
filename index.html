@@ -23,5 +23,12 @@
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
   <script type="module" src="./src/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
+      navigator.serviceWorker.register('./sw.js').catch(function(err) {
+        console.warn('[PWA] SW register:', err);
+      });
+    }
+  </script>
 </body>
 </html>
