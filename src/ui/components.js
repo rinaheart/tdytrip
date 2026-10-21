@@ -465,6 +465,7 @@ export function renderAddExpenseModal(state) {
             value="1" 
             min="0" 
             max="1000" 
+            inputmode="numeric"
           />
           <span style="font-size: 0.75rem; color: var(--text-muted);">phần</span>
         </div>
@@ -495,6 +496,7 @@ export function renderAddExpenseModal(state) {
               placeholder="100000" 
               min="1" 
               max="500000000" 
+              inputmode="numeric"
               required 
             />
           </div>
@@ -603,7 +605,7 @@ export function renderSettingsModal(state) {
             <div class="form-label">Thêm thành viên mới</div>
             <input type="text" id="inp-new-member-name" class="form-input" placeholder="Tên thành viên" required />
             <input type="text" id="inp-new-member-bank" class="form-input" placeholder="Tên ngân hàng (ví dụ: VCB, MB)" />
-            <input type="text" id="inp-new-member-stk" class="form-input num" placeholder="Số tài khoản (STK)" />
+            <input type="text" id="inp-new-member-stk" class="form-input num" inputmode="numeric" placeholder="Số tài khoản (STK)" />
             <button type="submit" class="btn-secondary" style="min-height: 40px; margin-top: 4px;">+ Thêm thành viên</button>
           </form>
         </div>

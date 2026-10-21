@@ -4,5 +4,5 @@
  */
 
 export const APP_VERSION = 'v0.4.2';
-export const BUILD_TIMESTAMP = '20261021_1506';
-export const BUILD_TAG = '#20261021_1506';
+export const BUILD_TIMESTAMP = '20261021_1528';
+export const BUILD_TAG = '#20261021_1528';
