@@ -1,8 +1,8 @@
 /**
- * TdyTripPWA2026 - UI Component Renderers (Phase 2)
+ * TdyTripPWA2026 - UI Component Renderers (Phase 3)
  * Vanilla HTML template string rendering.
  * Đảm bảo accessibility: role="tablist", role="tab", aria-label.
- * Cung cấp tiện ích clipboard copy và toast notification có clearTimeout.
+ * Cung cấp tiện ích clipboard copy, toast notification, sync badges, conflict banners và hard lock (TRIP_COMPLETE).
  */
 
 // Format VND số nguyên với tabular-nums
@@ -89,7 +89,97 @@ export function escapeHTML(str) {
 }
 
 // -------------------------------------------------------------
-// Component Renderers
+// Phase 3 Sync & Status Component Renderers
+// -------------------------------------------------------------
+
+export function renderSyncBadge(state) {
+  const syncStatus = state.syncStatus || 'IDLE';
+  const pendingCount = state.pendingOpsCount || 0;
+  const conflictsCount = state.conflicts?.length || 0;
+
+  if (syncStatus === 'SYNCING') {
+    return `<span id="sync-status-badge" class="sync-badge syncing" title="Đang đồng bộ dữ liệu">🔄 Đang đồng bộ...</span>`;
+  }
+  if (syncStatus === 'CONFLICT' || conflictsCount > 0) {
+    return `<span id="sync-status-badge" class="sync-badge conflict" title="Phát hiện xung đột phiên bản">🔴 Xung đột (${conflictsCount})</span>`;
+  }
+  if (syncStatus === 'ERROR') {
+    return `<span id="sync-status-badge" class="sync-badge error" title="Lỗi kết nối máy chủ">🔴 Lỗi kết nối</span>`;
+  }
+  if (pendingCount > 0) {
+    return `<span id="sync-status-badge" class="sync-badge pending" title="Dữ liệu đã lưu cục bộ, chờ gửi">🟡 Lưu cục bộ (${pendingCount})</span>`;
+  }
+  return `<span id="sync-status-badge" class="sync-badge synced" title="Dữ liệu đã đồng bộ an toàn">🟢 Đã đồng bộ</span>`;
+}
+
+export function renderTripLockedBanner(state) {
+  if (state.status !== 'COMPLETE') return '';
+  return `
+    <div class="trip-locked-banner" role="alert">
+      🔒 Chuyến đi đã khóa (Chế độ chỉ đọc)
+    </div>
+  `;
+}
+
+export function renderOfflineBanner(state) {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return `
+      <div class="offline-banner" role="status">
+        📡 Đang ngoại tuyến — Dữ liệu được lưu an toàn trên máy (IndexedDB)
+      </div>
+    `;
+  }
+  return '';
+}
+
+export function renderConflictBanner(state) {
+  if (!state.conflicts || state.conflicts.length === 0) return '';
+
+  return state.conflicts.map(op => {
+    const isCreate = op.type.endsWith('_CREATE');
+    const entityTitle = op.payload?.title || op.payload?.id || op.opId;
+
+    if (isCreate) {
+      // 3 lựa chọn cho CREATE: Giữ server / Tạo expense mới / Bỏ op
+      return `
+        <div class="conflict-card" data-op-id="${escapeHTML(op.opId)}">
+          <div class="conflict-header">⚠️ Xung đột tạo mới: "${escapeHTML(entityTitle)}"</div>
+          <div class="conflict-desc">Khoản chi này có ID hoặc dữ liệu đã tồn tại trên máy chủ. Bạn muốn xử lý thế nào?</div>
+          <div class="conflict-actions">
+            <button class="btn-conflict-action" data-op-id="${escapeHTML(op.opId)}" data-action="KEEP_SERVER">
+              Giữ bản server
+            </button>
+            <button class="btn-conflict-action btn-primary" data-op-id="${escapeHTML(op.opId)}" data-action="CREATE_NEW">
+              Tạo khoản chi mới
+            </button>
+            <button class="btn-conflict-action btn-secondary" data-op-id="${escapeHTML(op.opId)}" data-action="DROP_OP">
+              Bỏ op
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    // 2 lựa chọn cho UPDATE/DELETE: Giữ server / Bỏ op
+    return `
+      <div class="conflict-card" data-op-id="${escapeHTML(op.opId)}">
+        <div class="conflict-header">⚠️ Xung đột phiên bản (Stale Rev): "${escapeHTML(entityTitle)}"</div>
+        <div class="conflict-desc">Dữ liệu trên máy chủ đã thay đổi bởi người khác trước khi thao tác này được gửi.</div>
+        <div class="conflict-actions">
+          <button class="btn-conflict-action btn-primary" data-op-id="${escapeHTML(op.opId)}" data-action="KEEP_SERVER">
+            Giữ bản server
+          </button>
+          <button class="btn-conflict-action btn-secondary" data-op-id="${escapeHTML(op.opId)}" data-action="DROP_OP">
+            Bỏ op (Hủy thay đổi)
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// -------------------------------------------------------------
+// Core Component Renderers
 // -------------------------------------------------------------
 
 export function renderHeader(state) {
@@ -97,9 +187,18 @@ export function renderHeader(state) {
     <header class="app-header">
       <div class="header-title-group">
         <h1>${escapeHTML(state.tripName)}</h1>
-        <div class="trip-meta">${state.members.length} thành viên • In-Memory MVP</div>
+        <div class="trip-meta" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+          <span>${state.members.length} thành viên</span>
+          <span>•</span>
+          ${renderSyncBadge(state)}
+        </div>
       </div>
       <div class="header-actions">
+        ${state.isInstallable ? `
+          <button id="btn-install-pwa" class="btn-install-pwa" aria-label="Cài đặt ứng dụng">
+            ⬇️ Cài đặt
+          </button>
+        ` : ''}
         <button id="btn-open-settings" class="btn-icon" aria-label="Cài đặt chuyến đi và thành viên">
           ⚙️
         </button>
@@ -174,13 +273,14 @@ export function renderIdentityBanner(state) {
 export function renderExpenseList(state) {
   const activeExpenses = state.expenses.filter(e => !e.deleted);
   const memberMap = new Map(state.members.map(m => [m.id, m]));
+  const isLocked = state.status === 'COMPLETE';
 
   if (activeExpenses.length === 0) {
     return `
       <div style="text-align: center; padding: 40px 16px; color: var(--text-muted);">
-        Chưa có khoản chi nào. Bấm nút bên dưới để thêm khoản chi đầu tiên!
+        Chưa có khoản chi nào.
       </div>
-      <button id="btn-open-add" class="btn-primary" aria-label="Thêm khoản chi mới">+ Thêm khoản chi</button>
+      ${!isLocked ? '<button id="btn-open-add" class="btn-primary" aria-label="Thêm khoản chi mới">+ Thêm khoản chi</button>' : ''}
     `;
   }
 
@@ -200,9 +300,11 @@ export function renderExpenseList(state) {
             <span class="badge badge-payer">${escapeHTML(payerName)} trả</span>
             <span class="badge">${splitLabel} (${exp.participants.length} ng)</span>
           </div>
-          <button class="btn-delete btn-delete-expense" data-id="${escapeHTML(exp.id)}" aria-label="Xóa khoản chi ${escapeHTML(exp.title)}">
-            Xóa
-          </button>
+          ${!isLocked ? `
+            <button class="btn-delete btn-delete-expense" data-id="${escapeHTML(exp.id)}" aria-label="Xóa khoản chi ${escapeHTML(exp.title)}">
+              Xóa
+            </button>
+          ` : ''}
         </div>
       </div>
     `;
@@ -210,13 +312,14 @@ export function renderExpenseList(state) {
 
   return `
     <div class="expense-list">${itemsHTML}</div>
-    <button id="btn-open-add" class="btn-primary" aria-label="Thêm khoản chi mới">+ Thêm khoản chi</button>
+    ${!isLocked ? '<button id="btn-open-add" class="btn-primary" aria-label="Thêm khoản chi mới">+ Thêm khoản chi</button>' : ''}
   `;
 }
 
 export function renderDebtsView(state) {
   const memberMap = new Map(state.members.map(m => [m.id, m]));
   const balances = state.calculation?.balances || {};
+  const isLocked = state.status === 'COMPLETE';
 
   // 1. Grid số dư từng người
   const balanceGridHTML = state.members.map(m => {
@@ -300,15 +403,17 @@ export function renderDebtsView(state) {
             >
               💬 Copy nội dung CK
             </button>
-            <button 
-              class="btn-secondary btn-settle btn-mark-settled" 
-              data-from="${escapeHTML(debt.from)}" 
-              data-to="${escapeHTML(debt.to)}" 
-              data-amount="${debt.amount}"
-              aria-label="Xác nhận đã thanh toán ${formatVND(debt.amount)}"
-            >
-              ✓ Đã trả
-            </button>
+            ${!isLocked ? `
+              <button 
+                class="btn-secondary btn-settle btn-mark-settled" 
+                data-from="${escapeHTML(debt.from)}" 
+                data-to="${escapeHTML(debt.to)}" 
+                data-amount="${debt.amount}"
+                aria-label="Xác nhận đã thanh toán ${formatVND(debt.amount)}"
+              >
+                ✓ Đã trả
+              </button>
+            ` : ''}
           </div>
         </div>
       `;
@@ -469,10 +574,22 @@ export function renderSettingsModal(state) {
               <option value="">-- Không chọn (xem toàn bộ) --</option>
               ${identityOptions}
             </select>
-            <span style="font-size: 0.72rem; color: var(--text-muted);">Lưu in-memory, reset khi refresh trang</span>
+            <span style="font-size: 0.72rem; color: var(--text-muted);">Được lưu vào localStorage trên máy này</span>
           </div>
 
-          <div class="section-title" style="margin-top: 8px;">Danh sách thành viên</div>
+          <div class="form-group" style="margin-top: 10px;">
+            <label class="form-label">Trạng thái chuyến đi (Hard Lock)</label>
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--surface-alt); border-radius: var(--radius-sm); border: 1px solid var(--border);">
+              <span style="font-size: 0.85rem; font-weight: 600;">
+                ${state.status === 'COMPLETE' ? '🔒 Đã khóa (Chỉ đọc)' : '🟢 Đang mở (Active)'}
+              </span>
+              <button id="btn-toggle-trip-status" class="btn-secondary" style="min-height: 32px; font-size: 0.8rem;">
+                ${state.status === 'COMPLETE' ? 'Mở lại chuyến đi' : 'Khóa chuyến đi'}
+              </button>
+            </div>
+          </div>
+
+          <div class="section-title" style="margin-top: 12px;">Danh sách thành viên</div>
           <div style="display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto;">
             ${memberRowsHTML}
           </div>

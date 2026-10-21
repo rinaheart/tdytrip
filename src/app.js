@@ -1,10 +1,11 @@
 /**
- * TdyTripPWA2026 - Main Application Orchestrator (Phase 2)
- * Điều phối sự kiện DOM, render App Shell và kết nối In-Memory State.
- * Ranh giới: Thuần in-memory, không IndexedDB, không SW, không LocalStorage.
+ * TdyTripPWA2026 - Main Application Orchestrator (Phase 3)
+ * Điều phối sự kiện DOM, render App Shell, quản lý Offline Storage (IndexedDB),
+ * Sync Engine, Conflict Resolution và Hard Lock (TRIP_COMPLETE).
  */
 
 import { store } from './ui/state.js';
+import { syncEngine } from './sync/engine.js';
 import {
   renderHeader,
   renderTabs,
@@ -14,6 +15,9 @@ import {
   renderDebtsView,
   renderAddExpenseModal,
   renderSettingsModal,
+  renderOfflineBanner,
+  renderTripLockedBanner,
+  renderConflictBanner,
   showToast,
   copyToClipboard
 } from './ui/components.js';
@@ -24,6 +28,9 @@ function renderApp() {
   if (!root) return;
 
   const html = `
+    ${renderOfflineBanner(store)}
+    ${renderTripLockedBanner(store)}
+    ${renderConflictBanner(store)}
     ${renderHeader(store)}
     ${renderTabs(store)}
     ${renderSummaryCard(store)}
@@ -40,6 +47,9 @@ function renderApp() {
   root.innerHTML = html;
 }
 
+// Quản lý PWA Install Prompt
+let deferredPrompt = null;
+
 // Thiết lập Event Delegation trên root để quản lý sự kiện nhất quán
 function setupEventDelegation() {
   const root = document.getElementById('app');
@@ -47,6 +57,24 @@ function setupEventDelegation() {
 
   // 1. Click Events
   root.addEventListener('click', async (e) => {
+    // Cài đặt PWA
+    if (e.target.closest('#btn-install-pwa')) {
+      e.preventDefault();
+      if (deferredPrompt) {
+        deferredPrompt.prompt();
+        try {
+          const choice = await deferredPrompt.userChoice;
+          if (choice.outcome === 'accepted') {
+            showToast('Đang tiến hành cài đặt ứng dụng...');
+          }
+        } finally {
+          deferredPrompt = null;
+          store.setInstallable(false);
+        }
+      }
+      return;
+    }
+
     // Chuyển Tab Chi tiêu
     if (e.target.closest('#tab-btn-expenses')) {
       e.preventDefault();
@@ -75,9 +103,22 @@ function setupEventDelegation() {
       return;
     }
 
+    // Khóa / Mở lại chuyến đi (Hard Lock)
+    if (e.target.closest('#btn-toggle-trip-status')) {
+      e.preventDefault();
+      const newStatus = store.status === 'COMPLETE' ? 'ACTIVE' : 'COMPLETE';
+      store.setTripStatus(newStatus);
+      showToast(newStatus === 'COMPLETE' ? 'Đã khóa chuyến đi (Chế độ chỉ đọc)' : 'Đã mở lại chuyến đi');
+      return;
+    }
+
     // Mở Form Thêm Chi tiêu
     if (e.target.closest('#btn-open-add')) {
       e.preventDefault();
+      if (store.status === 'COMPLETE') {
+        showToast('Chuyến đi đã khóa. Không thể thêm khoản chi mới.');
+        return;
+      }
       store.setAddModalOpen(true);
       return;
     }
@@ -89,10 +130,32 @@ function setupEventDelegation() {
       return;
     }
 
+    // Xử lý nút phân giải xung đột (Conflict Resolution Buttons)
+    const conflictBtn = e.target.closest('.btn-conflict-action');
+    if (conflictBtn) {
+      e.preventDefault();
+      const opId = conflictBtn.dataset.opId;
+      const action = conflictBtn.dataset.action;
+      if (opId && action) {
+        try {
+          await store.resolveConflict(opId, action);
+          showToast('Đã giải quyết xung đột thành công!');
+        } catch (err) {
+          console.error('Lỗi giải quyết xung đột:', err);
+          showToast('Không thể giải quyết xung đột');
+        }
+      }
+      return;
+    }
+
     // Xóa khoản chi tiêu (Native confirm)
     const deleteBtn = e.target.closest('.btn-delete-expense');
     if (deleteBtn) {
       e.preventDefault();
+      if (store.status === 'COMPLETE') {
+        showToast('Chuyến đi đã khóa. Không thể xóa.');
+        return;
+      }
       const expId = deleteBtn.dataset.id;
       if (expId) {
         const confirmed = window.confirm('Bạn có chắc chắn muốn xóa khoản chi tiêu này?');
@@ -130,6 +193,10 @@ function setupEventDelegation() {
     const settleBtn = e.target.closest('.btn-mark-settled');
     if (settleBtn) {
       e.preventDefault();
+      if (store.status === 'COMPLETE') {
+        showToast('Chuyến đi đã khóa. Không thể ghi nhận thanh toán.');
+        return;
+      }
       const { from, to, amount } = settleBtn.dataset;
       if (from && to && amount) {
         try {
@@ -198,51 +265,30 @@ function setupEventDelegation() {
 
       try {
         hideError();
-        const title = document.getElementById('inp-title')?.value?.trim();
-        const amountRaw = document.getElementById('inp-amount')?.value;
-        const payerId = document.getElementById('sel-payer')?.value;
+        const titleInput = document.getElementById('inp-title');
+        const amountInput = document.getElementById('inp-amount');
+        const payerSelect = document.getElementById('sel-payer');
         const splitMethodRadio = document.querySelector('input[name="split_method"]:checked');
-        const splitMethod = splitMethodRadio ? splitMethodRadio.value : 'equal';
 
-        // Pre-validation tại UI
-        if (!title) {
-          throw new TypeError('Vui lòng nhập mô tả khoản chi');
-        }
-
-        const amount = Number(amountRaw);
-        if (!Number.isSafeInteger(amount) || amount <= 0) {
-          throw new TypeError('Số tiền phải là số nguyên dương hợp lệ');
-        }
-        if (amount > 500_000_000) {
-          throw new RangeError('Số tiền tối đa cho một khoản chi là 500.000.000 đ');
-        }
-
-        if (!payerId) {
-          throw new TypeError('Vui lòng chọn người thanh toán');
-        }
+        const title = titleInput?.value?.trim();
+        const amount = Number(amountInput?.value);
+        const payerId = payerSelect?.value;
+        const splitMethod = splitMethodRadio?.value || 'equal';
 
         let participants = [];
+
         if (splitMethod === 'equal') {
-          const checked = Array.from(document.querySelectorAll('input[name="equal_participant"]:checked'));
-          participants = checked.map(cb => cb.value);
-          if (participants.length === 0) {
-            throw new RangeError('Phải chọn ít nhất 1 người tham gia chia tiền');
-          }
-        } else if (splitMethod === 'shares') {
-          const weightInputs = Array.from(document.querySelectorAll('.shares-weight-input'));
-          for (const inp of weightInputs) {
-            const memberId = inp.name.replace('weight_', '');
-            const w = Number(inp.value);
-            if (!Number.isSafeInteger(w) || w < 0 || w > 1000) {
-              throw new RangeError(`Trọng số của thành viên phải từ 0 đến 1.000`);
-            }
-            if (w > 0) {
-              participants.push({ memberId, weight: w });
-            }
-          }
-          if (participants.length === 0) {
-            throw new RangeError('Phải có ít nhất 1 người tham gia (trọng số > 0)');
-          }
+          const checkedBoxes = document.querySelectorAll('input[name="equal_participant"]:checked');
+          participants = Array.from(checkedBoxes).map(cb => cb.value);
+        } else {
+          const weightInputs = document.querySelectorAll('.shares-weight-input');
+          participants = Array.from(weightInputs)
+            .map(inp => {
+              const memberId = inp.name.replace('weight_', '');
+              const weight = Number(inp.value) || 0;
+              return { memberId, weight };
+            })
+            .filter(p => p.weight > 0);
         }
 
         store.addExpense({
@@ -255,7 +301,7 @@ function setupEventDelegation() {
 
         showToast('Đã thêm khoản chi thành công!');
       } catch (err) {
-        showError(err.message || 'Lỗi dữ liệu đầu vào');
+        showError(err.message || 'Dữ liệu khoản chi không hợp lệ');
       }
       return;
     }
@@ -265,8 +311,8 @@ function setupEventDelegation() {
       e.preventDefault();
       try {
         const name = document.getElementById('inp-new-member-name')?.value?.trim();
-        const bankName = document.getElementById('inp-new-member-bank')?.value?.trim() || '';
-        const bankAccount = document.getElementById('inp-new-member-stk')?.value?.trim() || '';
+        const bankName = document.getElementById('inp-new-member-bank')?.value?.trim();
+        const bankAccount = document.getElementById('inp-new-member-stk')?.value?.trim();
 
         if (!name) {
           showToast('Vui lòng nhập tên thành viên');
@@ -292,7 +338,7 @@ function setupEventDelegation() {
 }
 
 // Khởi tạo ứng dụng
-function init() {
+async function init() {
   // Lắng nghe thay đổi từ Reactive Store
   store.subscribe(() => {
     renderApp();
@@ -300,11 +346,74 @@ function init() {
 
   // Thiết lập delegation và render lần đầu
   setupEventDelegation();
+
+  // Khởi tạo IndexedDB snapshot & localStorage
+  await store.init();
+
+  // Khởi động Sync Loop trong nền
+  syncEngine.start().catch(err => {
+    console.warn('Sync engine start note:', err);
+  });
+
+  // Đăng ký Service Worker cho PWA
+  registerServiceWorker();
+
+  // Lắng nghe sự kiện trước khi hiển thị hộp thoại cài đặt PWA
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    store.setInstallable(true);
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredPrompt = null;
+    store.setInstallable(false);
+    showToast('Ứng dụng TdyTrip đã được cài đặt thành công 🎉');
+  });
+
+  // Lắng nghe trạng thái mạng
+  window.addEventListener('online', () => {
+    showToast('Đã kết nối lại mạng 🟢');
+    renderApp();
+  });
+  window.addEventListener('offline', () => {
+    showToast('Đang ngoại tuyến — Dữ liệu lưu an toàn trên máy ✈️');
+    renderApp();
+  });
+
   renderApp();
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', init);
-} else {
-  init();
+function registerServiceWorker() {
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
+  const isSecure = window.location.protocol === 'https:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  if (!isSecure) return;
+
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js')
+      .then((reg) => {
+        console.log('[PWA] Service Worker đăng ký thành công với scope:', reg.scope);
+        reg.onupdatefound = () => {
+          const installingWorker = reg.installing;
+          if (installingWorker) {
+            installingWorker.onstatechange = () => {
+              if (installingWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                showToast('Đã có bản cập nhật mới. Tải lại trang để áp dụng.');
+              }
+            };
+          }
+        };
+      })
+      .catch((err) => {
+        console.warn('[PWA] Đăng ký Service Worker thất bại:', err);
+      });
+  });
+}
+
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
 }
