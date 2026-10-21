@@ -881,7 +881,9 @@ function exportReport() {
 
   const report = {
     appName: 'TdyTripPWA2026 Phase 0 PoC Verification',
-    reportVersion: 'v0.2.0',
+    harnessVersion: 'v0.2.1',
+    backendVersion: backendInfo.version || 'unknown',
+    reportVersion: 'v0.2.1',
     exportedAt: new Date().toISOString(),
     environment: {
       origin: window.location.origin,

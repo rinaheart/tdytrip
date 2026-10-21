@@ -1,0 +1,88 @@
+# ==============================================================================
+# TdyTripPWA2026 - .gitignore
+# Chỉ cho phép codebase cốt lõi của web app và các file cần thiết (README, CHANGELOG)
+# Loại bỏ triệt để: docs, plans, tests nội bộ, mocks, poc, configs nhạy cảm, agent files
+# ==============================================================================
+
+# --- Nội bộ: Tài liệu, Kế hoạch & Đặc tả (Docs & Plans) ---
+docs/
+*.plan.md
+*_plan.md
+SPEC.md
+DESIGN.md
+ARCHITECTURE.md
+
+# --- Nội bộ: Kiểm thử & Mocks (Tests & Mocks) ---
+tests/
+test/
+__tests__/
+*.test.js
+*.spec.js
+mocks/
+mock/
+scratch/
+
+# --- Nội bộ: PoC (Proof of Concept) & Báo cáo thiết bị (Chỉ giữ lại trang HTML kiểm thử) ---
+poc/*
+!poc/*.html
+!poc/gas_test.html
+
+# --- Secrets, API Keys & Environment Configs ---
+*.env
+*.env.*
+*.env.local
+*.local
+*config.json
+!package.json
+!tsconfig.json
+!vercel.json
+
+# --- AI Agents & Workspace Configurations ---
+.agents/
+.agent/
+.gemini/
+.claude/
+.system_generated/
+AGENTS.md
+GEMINI.md
+CLAUDE.md
+
+# --- Dependencies & Build artifacts ---
+node_modules/
+dist/
+build/
+.output/
+
+# --- IDE & Editor Settings ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Logs & Python Cache ---
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+__pycache__/
+*.pyc
+*.pyo
+
+# --- OS System Files ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ==============================================================================
+# CÁC FILE ĐƯỢC PHÉP ĐỒNG BỘ (BẬT LẠI NẾU BỊ MATCH PATTERN PHÍA TRÊN)
+# ==============================================================================
+!README.md
+!CHANGELOG.md
+!LICENSE
+!package.json
+!index.html
+!src/**
+!poc/*.html
+!poc/gas_test.html

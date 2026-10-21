@@ -1,0 +1,66 @@
+# ==============================================================================
+# TdyTripPWA2026 - .vercelignore
+# Chỉ deploy static web app cốt lõi lên Vercel Edge / CDN
+# Loại bỏ hoàn toàn test, docs, plans, poc, configs và agent files
+# ==============================================================================
+
+# --- Nội bộ: Docs & Plans ---
+docs/
+*.plan.md
+*_plan.md
+SPEC.md
+DESIGN.md
+ARCHITECTURE.md
+
+# --- Nội bộ: Tests & Mocks ---
+tests/
+test/
+__tests__/
+*.test.js
+*.spec.js
+mocks/
+mock/
+scratch/
+
+# --- Nội bộ: PoC & Scripts (Giữ lại HTML kiểm thử thực tế) ---
+poc/*
+!poc/*.html
+!poc/gas_test.html
+scripts/
+*.py
+__pycache__/
+*.pyc
+
+# --- Git & Configurations ---
+.git/
+.gitignore
+.vercelignore
+.github/
+
+# --- AI Agents & Workspace Configurations ---
+.agents/
+.agent/
+.gemini/
+.claude/
+.system_generated/
+AGENTS.md
+GEMINI.md
+CLAUDE.md
+
+# --- Secrets & Environment ---
+*.env
+*.env.*
+*.env.local
+*.local
+*config.json
+!vercel.json
+
+# --- OS & Logs ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*

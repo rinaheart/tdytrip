@@ -1,0 +1,11 @@
+{
+  "name": "tdytrip-pwa-2026",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/math.test.js tests/ui_smoke.test.js",
+    "test:math": "node --test tests/math.test.js",
+    "test:ui": "node --test tests/ui_smoke.test.js"
+  }
+}
