@@ -62,6 +62,10 @@ export async function executePullDelta(url, token, tripId = 'default_trip', time
     }
 
     snapshot.status = tripStatus;
+    snapshot.expenses = snapshot.expenses || [];
+    snapshot.settlements = snapshot.settlements || [];
+    snapshot.members = snapshot.members || [];
+    snapshot.unresolvedExpenses = snapshot.unresolvedExpenses || [];
 
     // 3. Hợp nhất các bản ghi (Upsert / Tombstone)
     for (const change of changes) {
@@ -90,17 +94,41 @@ export async function executePullDelta(url, token, tripId = 'default_trip', time
         } else {
           snapshot.members.push(change);
         }
+      } else {
+        // CONTRACT-TYPE-1: Bỏ qua an toàn các loại bản ghi chưa xác định
+        console.warn(`[Pull] Bỏ qua bản ghi loại không xác định: ${change && change.type}`);
       }
     }
 
-    // 4. Tái tính toán số dư và công nợ với Core Math
+    // 4. Cách ly bản ghi cũ/thiếu dữ liệu (unresolved) và tái tính toán với Core Math
+    const validExpenses = [];
+    const unresolvedExpenses = [];
+
+    for (const exp of snapshot.expenses) {
+      if (exp.deleted) {
+        validExpenses.push(exp);
+      } else {
+        const hasPayer = Boolean(exp.payerId && typeof exp.payerId === 'string');
+        const hasParticipants = Array.isArray(exp.participants) && exp.participants.length > 0;
+        if (hasPayer && hasParticipants) {
+          validExpenses.push(exp);
+        } else {
+          unresolvedExpenses.push(exp);
+        }
+      }
+    }
+
+    snapshot.unresolvedExpenses = unresolvedExpenses;
+    snapshot.calcIncomplete = unresolvedExpenses.length > 0;
+
     try {
       if (snapshot.members && snapshot.members.length > 0) {
-        snapshot.calculation = calculateBalances(snapshot.members, snapshot.expenses, snapshot.settlements);
+        snapshot.calculation = calculateBalances(snapshot.members, validExpenses, snapshot.settlements);
         snapshot.greedyDebts = simplifyDebts(snapshot.calculation.balances);
       }
     } catch (mathErr) {
       console.warn('Lỗi tính toán lại sau khi pull delta:', mathErr);
+      snapshot.calcIncomplete = true;
     }
 
     // 5. Lưu lại snapshot vào IndexedDB

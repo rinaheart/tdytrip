@@ -25,6 +25,8 @@ export async function resolveConflictAction(opId, choice, tripId = 'default_trip
     if (op.serverRecord) {
       const snapshot = await getSnapshot(tripId);
       if (snapshot) {
+        snapshot.expenses = snapshot.expenses || [];
+        snapshot.settlements = snapshot.settlements || [];
         if (op.type.startsWith('EXPENSE_')) {
           const idx = snapshot.expenses.findIndex(e => e.id === op.serverRecord.id);
           if (idx >= 0) snapshot.expenses[idx] = { ...op.serverRecord };
@@ -34,7 +36,8 @@ export async function resolveConflictAction(opId, choice, tripId = 'default_trip
           if (idx >= 0) snapshot.settlements[idx] = { ...op.serverRecord };
           else snapshot.settlements.push({ ...op.serverRecord });
         }
-        snapshot.calculation = calculateBalances(snapshot.members, snapshot.expenses, snapshot.settlements);
+        const validExpenses = snapshot.expenses.filter(e => e.deleted || (e.payerId && Array.isArray(e.participants) && e.participants.length > 0));
+        snapshot.calculation = calculateBalances(snapshot.members, validExpenses, snapshot.settlements);
         snapshot.greedyDebts = simplifyDebts(snapshot.calculation.balances);
         await saveSnapshot(snapshot);
       }
@@ -45,15 +48,29 @@ export async function resolveConflictAction(opId, choice, tripId = 'default_trip
 
     const snapshot = await getSnapshot(tripId);
     if (snapshot) {
-      if (isCreate) {
-        // Khoản chi vừa tạo bị hủy bỏ hoàn toàn
-        snapshot.expenses = snapshot.expenses.filter(e => e.id !== op.payload.id);
-      } else if (op.serverRecord) {
-        // Khoản sửa/xóa khôi phục về bản server
-        const idx = snapshot.expenses.findIndex(e => e.id === op.serverRecord.id);
-        if (idx >= 0) snapshot.expenses[idx] = { ...op.serverRecord };
+      snapshot.expenses = snapshot.expenses || [];
+      snapshot.settlements = snapshot.settlements || [];
+      if (op.type.startsWith('EXPENSE_')) {
+        if (isCreate) {
+          // Khoản chi vừa tạo bị hủy bỏ hoàn toàn
+          snapshot.expenses = snapshot.expenses.filter(e => e.id !== op.payload.id);
+        } else if (op.serverRecord) {
+          // Khoản sửa/xóa khôi phục về bản server
+          const idx = snapshot.expenses.findIndex(e => e.id === op.serverRecord.id);
+          if (idx >= 0) snapshot.expenses[idx] = { ...op.serverRecord };
+        }
+      } else if (op.type.startsWith('SETTLEMENT_')) {
+        if (isCreate) {
+          // Khoản thanh toán vừa tạo bị hủy bỏ hoàn toàn
+          snapshot.settlements = snapshot.settlements.filter(s => s.id !== op.payload.id);
+        } else if (op.serverRecord) {
+          // Khoản thanh toán sửa/xóa khôi phục về bản server
+          const idx = snapshot.settlements.findIndex(s => s.id === op.serverRecord.id);
+          if (idx >= 0) snapshot.settlements[idx] = { ...op.serverRecord };
+        }
       }
-      snapshot.calculation = calculateBalances(snapshot.members, snapshot.expenses, snapshot.settlements);
+      const validExpenses = snapshot.expenses.filter(e => e.deleted || (e.payerId && Array.isArray(e.participants) && e.participants.length > 0));
+      snapshot.calculation = calculateBalances(snapshot.members, validExpenses, snapshot.settlements);
       snapshot.greedyDebts = simplifyDebts(snapshot.calculation.balances);
       await saveSnapshot(snapshot);
     }
